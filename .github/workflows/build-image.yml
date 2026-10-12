@@ -1,0 +1,96 @@
+# Builds the app's Docker image.
+
+# Image tag = the git TREE hash, not the commit SHA. The tree hash depends only
+# on file contents, so it is identical on Development, Staging and Production
+# once they contain the same code.
+
+name: Build Docker image
+
+on:
+    pull_request:
+        branches: [Development]
+    workflow_call:
+        outputs:
+            built:
+                description: "'true' if an image was built"
+                value: ${{ jobs.build.outputs.built }}
+            image-ref:
+                description: Local image reference inside the saved artifact
+                value: ${{ jobs.build.outputs.image-ref }}
+            image-tag:
+                description: Tree hash used as the image tag
+                value: ${{ jobs.build.outputs.image-tag }}
+            commit-sha:
+                description: Commit the image was built from
+                value: ${{ jobs.build.outputs.commit-sha }}
+
+permissions:
+    contents: read
+
+env:
+    IMAGE_NAME: sociallite # local image name; the ECR name is set in push-ecr.yml
+    DOCKERFILE: Dockerfile # TODO: path to the Dockerfile
+    BUILD_CONTEXT: . # TODO: Docker build context folder
+    ARTIFACT_NAME: docker-image
+
+jobs:
+    build:
+        name: Build Docker image
+        runs-on: ubuntu-latest
+        outputs:
+            built: ${{ steps.dockerfile.outputs.present }}
+            image-ref: ${{ steps.tags.outputs.image-ref }}
+            image-tag: ${{ steps.tags.outputs.tree }}
+            commit-sha: ${{ steps.tags.outputs.commit }}
+
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Check for a Dockerfile
+              id: dockerfile
+              run: |
+                  if [ -f "$DOCKERFILE" ]; then
+                    echo "present=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "present=false" >> "$GITHUB_OUTPUT"
+                    echo "::notice::No Dockerfile at '$DOCKERFILE' yet. Skipping image build (stub)."
+                  fi
+
+            - name: Work out image tags
+              if: steps.dockerfile.outputs.present == 'true'
+              id: tags
+              run: |
+                  tree=$(git rev-parse 'HEAD^{tree}')
+                  commit=$(git rev-parse HEAD)
+                  {
+                    echo "tree=$tree"
+                    echo "commit=$commit"
+                    echo "image-ref=$IMAGE_NAME:$tree"
+                  } >> "$GITHUB_OUTPUT"
+                  echo "Image will be tagged $IMAGE_NAME:$tree (commit ${commit::7})"
+
+            - name: Set up Docker Buildx
+              if: steps.dockerfile.outputs.present == 'true'
+              uses: docker/setup-buildx-action@v4
+
+            # On PRs: build only (nothing saved). In the pipeline: save to a tar file.
+            - name: Build image
+              if: steps.dockerfile.outputs.present == 'true'
+              uses: docker/build-push-action@v7
+              with:
+                  context: ${{ env.BUILD_CONTEXT }}
+                  file: ${{ env.DOCKERFILE }}
+                  tags: ${{ steps.tags.outputs.image-ref }}
+                  push: false
+                  outputs: ${{ github.event_name != 'pull_request' && format('type=docker,dest={0}/image.tar', runner.temp) || '' }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            - name: Save image for the push stage
+              if: steps.dockerfile.outputs.present == 'true' && github.event_name != 'pull_request'
+              uses: actions/upload-artifact@v7
+              with:
+                  name: ${{ env.ARTIFACT_NAME }}
+                  path: ${{ runner.temp }}/image.tar
+                  retention-days: 1
+                  if-no-files-found: error

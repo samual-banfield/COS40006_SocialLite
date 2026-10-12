@@ -1,0 +1,95 @@
+# Pushes the image built by build-image.yml to Amazon ECR.
+
+name: Push image to ECR
+
+on:
+    workflow_call:
+        inputs:
+            image-ref:
+                description: Local image reference inside the saved artifact
+                type: string
+                required: false
+                default: ""
+            image-tag:
+                description: Tree hash to tag the image with
+                type: string
+                required: false
+                default: ""
+            commit-sha:
+                description: Commit the image was built from
+                type: string
+                required: false
+                default: ""
+
+permissions:
+    contents: read
+    id-token: write # lets the job request an OIDC token for AWS
+
+env:
+    ARTIFACT_NAME: docker-image
+
+jobs:
+    push:
+        name: Push image to ECR
+        runs-on: ubuntu-latest
+        env:
+            AWS_REGION: ${{ vars.AWS_REGION }}
+            AWS_ROLE_ARN: ${{ vars.AWS_ECR_PUSH_ROLE_ARN }}
+            ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+            IMAGE_REF: ${{ inputs.image-ref }}
+            IMAGE_TAG: ${{ inputs.image-tag }}
+            COMMIT_SHA: ${{ inputs.commit-sha }}
+
+        steps:
+            - name: Check there is something to push
+              id: ready
+              run: |
+                  if [ -z "$IMAGE_REF" ]; then
+                    echo "ready=false" >> "$GITHUB_OUTPUT"
+                    echo "::notice::No image was built. Skipping ECR push (stub)."
+                  elif [ -z "$AWS_REGION" ] || [ -z "$AWS_ROLE_ARN" ] || [ -z "$ECR_REPOSITORY" ]; then
+                    echo "ready=false" >> "$GITHUB_OUTPUT"
+                    echo "::notice::ECR not configured yet (AWS_REGION, AWS_ECR_PUSH_ROLE_ARN, ECR_REPOSITORY). Skipping push (stub)."
+                  else
+                    echo "ready=true" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Download built image
+              if: steps.ready.outputs.ready == 'true'
+              uses: actions/download-artifact@v8
+              with:
+                  name: ${{ env.ARTIFACT_NAME }}
+                  path: ${{ runner.temp }}
+
+            - name: Load image into Docker
+              if: steps.ready.outputs.ready == 'true'
+              run: docker load --input "$RUNNER_TEMP/image.tar"
+
+            - name: Configure AWS credentials (OIDC)
+              if: steps.ready.outputs.ready == 'true'
+              uses: aws-actions/configure-aws-credentials@v6
+              with:
+                  role-to-assume: ${{ env.AWS_ROLE_ARN }}
+                  aws-region: ${{ env.AWS_REGION }}
+
+            - name: Log in to Amazon ECR
+              if: steps.ready.outputs.ready == 'true'
+              id: ecr
+              uses: aws-actions/amazon-ecr-login@v2
+
+            - name: Tag and push
+              if: steps.ready.outputs.ready == 'true'
+              env:
+                  REGISTRY: ${{ steps.ecr.outputs.registry }}
+              run: |
+                  set -euo pipefail
+                  target="$REGISTRY/$ECR_REPOSITORY"
+                  docker tag "$IMAGE_REF" "$target:$IMAGE_TAG"
+                  docker tag "$IMAGE_REF" "$target:$COMMIT_SHA"
+                  docker push "$target:$IMAGE_TAG"
+                  docker push "$target:$COMMIT_SHA"
+                  {
+                    echo "### Pushed to ECR"
+                    echo "- \`$target:$IMAGE_TAG\` (tree)"
+                    echo "- \`$target:$COMMIT_SHA\` (commit)"
+                  } >> "$GITHUB_STEP_SUMMARY"
