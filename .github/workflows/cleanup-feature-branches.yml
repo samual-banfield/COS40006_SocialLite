@@ -1,0 +1,81 @@
+# Deletes feature branches once their work has been released to Production.
+#
+# Runs whenever Production is updated (i.e. a release PR is merged). For each
+# PR that was merged into Development, its head branch is deleted only if:
+#   - the PR's merge commit is now contained in Production
+#   - the branch hasn't had new commits since that PR was merged
+#   - the branch has no other PR open
+# Branches whose work is still in Development or Staging are kept, so a feature
+# that fails later testing can be fixed on the same branch and re-submitted.
+#
+# Development, Staging and Production are never touched.
+# Leave "Automatically delete head branches" OFF in repo settings, or GitHub
+# will delete branches as soon as they merge into Development.
+
+name: Clean up released feature branches
+
+on:
+  push:
+    branches: [Production]
+  workflow_dispatch: # run by hand from the Actions tab
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: cleanup-feature-branches
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete feature branches whose work is in Production
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          prod_sha=$(gh api "repos/$GH_REPO/branches/Production" --jq '.commit.sha')
+          existing=$(gh api "repos/$GH_REPO/branches" --paginate --jq '.[].name')
+          deleted=0
+
+          # fd 3 so the gh calls inside the loop can't swallow the PR list
+          while IFS=$'\t' read -r -u 3 number branch pr_head merge_sha cross; do
+            case "$branch" in Development|Staging|Production) continue ;; esac
+            [ "$cross" = "true" ] && continue          # PRs from forks
+            [ -n "$merge_sha" ] || continue
+            grep -qxF -- "$branch" <<< "$existing" || continue   # already gone
+
+            current=$(gh api "repos/$GH_REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null) || continue
+
+            if [ "$current" != "$pr_head" ]; then
+              echo "Keeping $branch: it has new commits since PR #$number was merged."
+              continue
+            fi
+
+            open=$(gh pr list --head "$branch" --state open --json number --jq 'length')
+            if [ "$open" != "0" ]; then
+              echo "Keeping $branch: it has an open PR."
+              continue
+            fi
+
+            # "ahead"/"identical" = the merge commit is an ancestor of Production
+            status=$(gh api "repos/$GH_REPO/compare/$merge_sha...$prod_sha" --jq '.status')
+            case "$status" in
+              ahead|identical)
+                gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch" > /dev/null
+                echo "Deleted $branch (PR #$number is now in Production)."
+                deleted=$((deleted + 1))
+                ;;
+              *)
+                echo "Keeping $branch: PR #$number hasn't reached Production yet."
+                ;;
+            esac
+          done 3< <(gh pr list --base Development --state merged --limit 200 \
+                      --json number,headRefName,headRefOid,mergeCommit,isCrossRepository \
+                      --jq '.[] | [.number, .headRefName, .headRefOid, (.mergeCommit.oid // ""), .isCrossRepository] | @tsv')
+
+          echo "Deleted $deleted released feature branch(es)."
