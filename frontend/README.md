@@ -1,16 +1,13 @@
-# React + Vite
+## Running
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+1. Start the backend on port 3000 (`node ./src/server.js` from `backend/`)
+2. From `frontend/`: `npm i` then `npm run dev`
 
-Currently, two official plugins are available:
+## Structure
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- `src/App.jsx` - header, login state, mounts Home and LoginModal
+- `src/components/Home.jsx` - the home screen, renders the Feed
+- `src/components/Feed.jsx` - fetches `GET /api/feed` and renders a list of Posts
+- `src/components/Post.jsx` - a single post: `content` string and optional `image` url
+- `src/components/LoginModal.jsx` - login form in a native `<dialog>` (not wired to auth yet)
+- `src/api.js` - backend fetch helpers

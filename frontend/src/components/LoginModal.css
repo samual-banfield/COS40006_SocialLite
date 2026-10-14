@@ -1,0 +1,43 @@
+.login-modal {
+    padding: 0;
+    border: none;
+    border-radius: 10px;
+    width: min(360px, calc(100% - 32px));
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+}
+
+.login-modal::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 24px;
+}
+
+.login-form h2 {
+    margin: 0;
+}
+
+.login-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.9rem;
+    color: var(--muted);
+}
+
+.login-form input {
+    font: inherit;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.login-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}

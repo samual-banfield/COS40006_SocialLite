@@ -1,6 +1,8 @@
 const request = require("supertest");
 const app = require("../src/app");
 
+// TODO: Generate more post tests
+
 describe("GET /api/post/:id", () => {
     it("returns the post for a valid id", async () => {
         const res = await request(app).get("/api/post/7");

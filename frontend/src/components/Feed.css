@@ -1,0 +1,14 @@
+.feed {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.feed-status {
+    text-align: center;
+    color: var(--muted);
+}
+
+.feed-error {
+    color: var(--error);
+}
