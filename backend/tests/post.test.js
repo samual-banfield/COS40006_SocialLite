@@ -11,5 +11,6 @@ describe("GET /api/post/:id", () => {
     it("returns 400 for a non-numeric id", async () => {
         const res = await request(app).get("/api/post/abc");
         expect(res.status).toBe(400);
+        expect(res.body).toHaveProperty("error");
     });
 });

@@ -1,4 +1,4 @@
-const validInteger = function (req, res, next) {
+const validaId = function (req, res, next) {
     const id = Number(req.params.id);
     // checking that id is a valid positive whole integer
     if (!Number.isInteger(id) || id <= 0) {
@@ -10,4 +10,4 @@ const validInteger = function (req, res, next) {
     next();
 };
 
-module.exports = validInteger;
+module.exports = validaId;
