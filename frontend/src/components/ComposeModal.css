@@ -1,0 +1,49 @@
+.compose-modal {
+    max-width: 35rem;
+}
+
+.compose-body {
+    gap: 1.25rem;
+    padding: 1.5rem;
+}
+
+.compose-head {
+    align-items: center;
+}
+
+.compose-who {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.compose-title {
+    font-size: 1.5rem;
+}
+
+.compose-as {
+    font-size: 0.875rem;
+    color: var(--muted);
+}
+
+.compose-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.compose-count {
+    font-size: 0.8125rem;
+    color: var(--muted);
+}
+
+.compose-buttons {
+    display: flex;
+    gap: 0.625rem;
+}
+
+.compose-submit {
+    padding: 0 1.625rem;
+}
