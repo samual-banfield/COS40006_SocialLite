@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
-import { getFeed } from "./api.js";
-import TEMP_POSTS from "./tempPosts.js";
+import {
+    createPost,
+    deletePost,
+    getFeed,
+    getPost,
+    likePost,
+    unlikePost,
+} from "./api.js";
 import Header from "./components/Header.jsx";
 import Feed from "./components/Feed.jsx";
 import PostView from "./components/PostView.jsx";
@@ -13,19 +19,37 @@ function App() {
     const [loginOpen, setLoginOpen] = useState(false);
     const [composeOpen, setComposeOpen] = useState(false);
 
-    const [posts, setPosts] = useState(TEMP_POSTS);
+    const [posts, setPosts] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [openPostId, setOpenPostId] = useState(null);
 
     useEffect(() => {
         getFeed()
-            .then((fetched) => setPosts((prev) => [...prev, ...fetched]))
+            .then(setPosts)
             .catch((err) => setError(err.message))
             .finally(() => setLoading(false));
     }, []);
 
+    // the feed copy shows straight away, then gets swapped for the latest version
+    useEffect(() => {
+        if (openPostId === null) return;
+        getPost(openPostId)
+            .then((fresh) =>
+                setPosts((prev) => prev.map((p) => (p.id === fresh.id ? fresh : p))),
+            )
+            .catch((err) => {
+                setPosts((prev) => prev.filter((p) => p.id !== openPostId));
+                setOpenPostId(null);
+                setError(err.message);
+            });
+    }, [openPostId]);
+
     const openPost = posts.find((p) => p.id === openPostId);
+
+    function replacePost(updated) {
+        setPosts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    }
 
     function handleLogin(loggedInUser) {
         setUser(loggedInUser);
@@ -37,17 +61,29 @@ function App() {
         setComposeOpen(false);
     }
 
-    function handleNewPost({ title, content }) {
-        // TODO: POST /api/post once the backend route exists, for now it only lives in the browser
-        const post = {
-            id: `local-${Date.now()}`,
-            username: user.username,
-            createdAt: new Date().toISOString(),
-            title,
-            content,
-        };
+    // errors are left to bubble up so the modal can show them
+    async function handleNewPost({ title, content }) {
+        const post = await createPost({ username: user.username, title, content });
         setPosts((prev) => [post, ...prev]);
         setComposeOpen(false);
+        setOpenPostId(null);
+    }
+
+    async function handleToggleLike(post) {
+        if (!user) {
+            setLoginOpen(true);
+            return;
+        }
+        const liked = post.likedBy.includes(user.username);
+        const updated = liked
+            ? await unlikePost(post.id, user.username)
+            : await likePost(post.id, user.username);
+        replacePost(updated);
+    }
+
+    async function handleDelete(post) {
+        await deletePost(post.id, user.username);
+        setPosts((prev) => prev.filter((p) => p.id !== post.id));
         setOpenPostId(null);
     }
 
@@ -63,13 +99,22 @@ function App() {
 
             <main className="main">
                 {openPost ? (
-                    <PostView post={openPost} onBack={() => setOpenPostId(null)} />
+                    <PostView
+                        post={openPost}
+                        user={user}
+                        onBack={() => setOpenPostId(null)}
+                        onToggleLike={handleToggleLike}
+                        onDelete={handleDelete}
+                    />
                 ) : (
                     <Feed
                         posts={posts}
                         loading={loading}
                         error={error}
-                        onOpenPost={setOpenPostId}
+                        onOpenPost={(id) => {
+                            setError(null);
+                            setOpenPostId(id);
+                        }}
                     />
                 )}
             </main>

@@ -56,3 +56,11 @@
     font-weight: 600;
     color: var(--accent);
 }
+
+.post-likes {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.8125rem;
+    color: var(--muted);
+}

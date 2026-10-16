@@ -56,3 +56,38 @@
     line-height: 1.65;
     text-wrap: pretty;
 }
+
+.post-view-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border);
+}
+
+.post-like.is-liked {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+}
+
+.post-like-count {
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+}
+
+.post-like.is-liked .post-like-count {
+    color: inherit;
+}
+
+.post-delete {
+    color: var(--error);
+}
+
+.post-view-error {
+    margin: 0;
+    font-size: 0.875rem;
+    color: var(--error);
+}

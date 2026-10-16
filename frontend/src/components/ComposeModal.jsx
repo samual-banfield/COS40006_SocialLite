@@ -3,6 +3,8 @@ import Avatar from "./Avatar.jsx";
 import "./Modal.css";
 import "./ComposeModal.css";
 
+// keep in sync with backend/src/middleware/validPostContent.js
+const MAX_TITLE = 100;
 const MAX_CHARS = 500;
 
 // new post form, same native <dialog> pattern as the login modal
@@ -10,6 +12,8 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
     const dialogRef = useRef(null);
     const [title, setTitle] = useState("");
     const [content, setContent] = useState("");
+    const [submitting, setSubmitting] = useState(false);
+    const [error, setError] = useState("");
 
     useEffect(() => {
         const dialog = dialogRef.current;
@@ -17,17 +21,27 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
         if (!open && dialog.open) dialog.close();
     }, [open]);
 
-    const canPost = title.trim() !== "" && content.trim() !== "";
+    const canPost = title.trim() !== "" && content.trim() !== "" && !submitting;
 
-    function handleSubmit(e) {
+    // on success the parent closes the modal, which clears the form via handleClose
+    async function handleSubmit(e) {
         e.preventDefault();
         if (!canPost) return;
-        onSubmit({ title: title.trim(), content: content.trim() });
+        setSubmitting(true);
+        setError("");
+        try {
+            await onSubmit({ title: title.trim(), content: content.trim() });
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setSubmitting(false);
+        }
     }
 
     function handleClose() {
         setTitle("");
         setContent("");
+        setError("");
         onClose();
     }
 
@@ -80,6 +94,7 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
                             id="compose-post-title"
                             type="text"
                             value={title}
+                            maxLength={MAX_TITLE}
                             onChange={(e) => setTitle(e.target.value)}
                         />
                     </div>
@@ -95,6 +110,11 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
                             placeholder="What’s on your mind?"
                         />
                     </div>
+                    {error && (
+                        <p role="alert" className="modal-error">
+                            {error}
+                        </p>
+                    )}
                     <div className="compose-actions">
                         <span className="compose-count">
                             {content.length} / {MAX_CHARS}
@@ -112,7 +132,7 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
                                 className="btn btn-primary compose-submit"
                                 disabled={!canPost}
                             >
-                                Post
+                                {submitting ? "Posting..." : "Post"}
                             </button>
                         </div>
                     </div>

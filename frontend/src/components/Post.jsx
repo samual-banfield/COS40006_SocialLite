@@ -18,6 +18,7 @@ export function PostAuthor({ username, createdAt, size }) {
 // a post in the feed, clicking it opens the full post
 function Post({ post, onOpen }) {
     const { excerpt, isLong } = excerptOf(post.content);
+    const likeCount = post.likedBy?.length ?? 0;
 
     return (
         <button
@@ -32,6 +33,21 @@ function Post({ post, onOpen }) {
                 <img className="post-image" src={post.image} alt="" />
             )}
             <span className="post-excerpt">{excerpt}</span>
+            <span className="post-likes">
+                <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                >
+                    <path d="M12 20s-7-4.35-7-10a4 4 0 0 1 7-2.65A4 4 0 0 1 19 10c0 5.65-7 10-7 10z" />
+                </svg>
+                {likeCount} {likeCount === 1 ? "like" : "likes"}
+            </span>
             {isLong && (
                 <span className="post-more">
                     Read the full post
