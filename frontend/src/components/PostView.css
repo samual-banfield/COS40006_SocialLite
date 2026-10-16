@@ -82,10 +82,6 @@
     color: inherit;
 }
 
-.post-delete {
-    color: var(--error);
-}
-
 .post-view-error {
     margin: 0;
     font-size: 0.875rem;

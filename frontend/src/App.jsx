@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import {
     createPost,
-    deletePost,
     getFeed,
     getPost,
     likePost,
+    login,
+    setToken,
     unlikePost,
 } from "./api.js";
 import Header from "./components/Header.jsx";
@@ -24,12 +25,13 @@ function App() {
     const [error, setError] = useState(null);
     const [openPostId, setOpenPostId] = useState(null);
 
+    // refetched on login/logout since likedByMe depends on who is asking
     useEffect(() => {
         getFeed()
             .then(setPosts)
             .catch((err) => setError(err.message))
             .finally(() => setLoading(false));
-    }, []);
+    }, [user]);
 
     // the feed copy shows straight away, then gets swapped for the latest version
     useEffect(() => {
@@ -51,19 +53,23 @@ function App() {
         setPosts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
     }
 
-    function handleLogin(loggedInUser) {
-        setUser(loggedInUser);
+    // errors are left to bubble up so the modal can show them
+    async function handleLogin({ username, password }) {
+        const { token, user } = await login({ username, password });
+        setToken(token);
+        setUser(user);
         setLoginOpen(false);
     }
 
     function handleLogout() {
+        setToken(null);
         setUser(null);
         setComposeOpen(false);
     }
 
     // errors are left to bubble up so the modal can show them
     async function handleNewPost({ title, content }) {
-        const post = await createPost({ username: user.username, title, content });
+        const post = await createPost({ title, content });
         setPosts((prev) => [post, ...prev]);
         setComposeOpen(false);
         setOpenPostId(null);
@@ -74,17 +80,11 @@ function App() {
             setLoginOpen(true);
             return;
         }
-        const liked = post.likedBy.includes(user.username);
+        const liked = post.likedByMe;
         const updated = liked
-            ? await unlikePost(post.id, user.username)
-            : await likePost(post.id, user.username);
+            ? await unlikePost(post.id)
+            : await likePost(post.id);
         replacePost(updated);
-    }
-
-    async function handleDelete(post) {
-        await deletePost(post.id, user.username);
-        setPosts((prev) => prev.filter((p) => p.id !== post.id));
-        setOpenPostId(null);
     }
 
     return (
@@ -104,7 +104,6 @@ function App() {
                         user={user}
                         onBack={() => setOpenPostId(null)}
                         onToggleLike={handleToggleLike}
-                        onDelete={handleDelete}
                     />
                 ) : (
                     <Feed

@@ -15,14 +15,17 @@ function LoginModal({ open, onClose, onLogin }) {
         if (!open && dialog.open) dialog.close();
     }, [open]);
 
-    function handleSubmit(e) {
+    async function handleSubmit(e) {
         e.preventDefault();
         if (!username.trim() || !password) {
             setError("Enter your username and password to log in.");
             return;
         }
-        // TODO: call /api/auth/login once the backend auth route exists
-        onLogin({ username: username.trim() });
+        try {
+            await onLogin({ username: username.trim(), password });
+        } catch (err) {
+            setError(err.message);
+        }
     }
 
     // the modal stays mounted between opens, so clear the form whenever it closes

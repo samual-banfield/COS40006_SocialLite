@@ -1,12 +1,21 @@
 // thin wrappers around the backend API, see backend/src/app.js for routes
 
-// TODO: once auth exists the backend will know who the user is, so the
-// username arguments below can be dropped
+// the JWT from /api/auth/login, sent with every request once logged in.
+// it only lives in memory, so refreshing the page logs you out.
+let token = null;
+
+export function setToken(newToken) {
+    token = newToken;
+}
 
 async function request(path, { method = "GET", body } = {}) {
+    const headers = {};
+    if (body) headers["Content-Type"] = "application/json";
+    if (token) headers.Authorization = `Bearer ${token}`;
+
     const res = await fetch(path, {
         method,
-        headers: body ? { "Content-Type": "application/json" } : undefined,
+        headers,
         body: body ? JSON.stringify(body) : undefined,
     });
     if (res.status === 204) return null;
@@ -19,6 +28,14 @@ async function request(path, { method = "GET", body } = {}) {
     return data;
 }
 
+// returns { token, user }
+export function login({ username, password }) {
+    return request("/api/auth/login", {
+        method: "POST",
+        body: { username, password },
+    });
+}
+
 export async function getFeed() {
     const data = await request("/api/feed");
     return data.posts;
@@ -28,21 +45,14 @@ export function getPost(id) {
     return request(`/api/post/${id}`);
 }
 
-export function createPost({ username, title, content }) {
-    return request("/api/post", {
-        method: "POST",
-        body: { username, title, content },
-    });
+export function createPost({ title, content }) {
+    return request("/api/post", { method: "POST", body: { title, content } });
 }
 
-export function deletePost(id, username) {
-    return request(`/api/post/${id}`, { method: "DELETE", body: { username } });
+export function likePost(id) {
+    return request(`/api/post/${id}/like`, { method: "POST" });
 }
 
-export function likePost(id, username) {
-    return request(`/api/post/${id}/like`, { method: "POST", body: { username } });
-}
-
-export function unlikePost(id, username) {
-    return request(`/api/post/${id}/like`, { method: "DELETE", body: { username } });
+export function unlikePost(id) {
+    return request(`/api/post/${id}/like`, { method: "DELETE" });
 }

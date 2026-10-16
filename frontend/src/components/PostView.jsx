@@ -4,15 +4,14 @@ import { paragraphsOf } from "../format.js";
 import "./PostView.css";
 
 // the full post, shown in place of the feed
-function PostView({ post, user, onBack, onToggleLike, onDelete }) {
+function PostView({ post, user, onBack, onToggleLike }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
 
-    const likeCount = post.likedBy?.length ?? 0;
-    const liked = !!user && post.likedBy?.includes(user.username);
-    const isOwner = !!user && user.username === post.username;
+    const likeCount = post.likes ?? 0;
+    const liked = !!user && post.likedByMe;
 
-    // runs a like/delete request, showing any failure under the post
+    // runs a like request, showing any failure under the post
     async function run(action) {
         setBusy(true);
         setError("");
@@ -22,12 +21,6 @@ function PostView({ post, user, onBack, onToggleLike, onDelete }) {
             setError(err.message);
         } finally {
             setBusy(false);
-        }
-    }
-
-    function handleDelete() {
-        if (window.confirm("Delete this post? This can't be undone.")) {
-            run(onDelete);
         }
     }
 
@@ -94,17 +87,6 @@ function PostView({ post, user, onBack, onToggleLike, onDelete }) {
                         {liked ? "Liked" : "Like"}
                         <span className="post-like-count">{likeCount}</span>
                     </button>
-
-                    {isOwner && (
-                        <button
-                            type="button"
-                            className="btn btn-secondary post-delete"
-                            onClick={handleDelete}
-                            disabled={busy}
-                        >
-                            Delete
-                        </button>
-                    )}
                 </div>
                 {error && (
                     <p role="alert" className="post-view-error">
