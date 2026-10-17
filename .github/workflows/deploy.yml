@@ -51,14 +51,30 @@ jobs:
                   return loader.construct_mapping(node)
               return None
 
-          CloudFormationLoader.add_multi_constructor("!", cloudformation_tag)
+          CloudFormationLoader.add_multi_constructor(
+              "!", cloudformation_tag
+          )
 
-          with open("cloudformation/template.yaml", encoding="utf-8") as file:
-              template = yaml.load(file, Loader=CloudFormationLoader)
+          with open(
+              "cloudformation/template.yaml",
+              encoding="utf-8"
+          ) as file:
+              template = yaml.load(
+                  file,
+                  Loader=CloudFormationLoader
+              )
 
-          assert isinstance(template, dict), "Template must be a YAML mapping"
-          assert "Resources" in template, "Template must contain Resources"
-          assert "Parameters" in template, "Template must contain Parameters"
+          assert isinstance(
+              template, dict
+          ), "Template must be a YAML mapping"
+
+          assert "Resources" in template, (
+              "Template must contain Resources"
+          )
+
+          assert "Parameters" in template, (
+              "Template must contain Parameters"
+          )
 
           print("CloudFormation YAML structure looks valid.")
           PY
@@ -74,7 +90,8 @@ jobs:
           APP_URL="http://ec2-18-209-212-78.compute-1.amazonaws.com"
 
           for attempt in $(seq 1 12); do
-            if curl --fail --silent --show-error "$APP_URL/health"; then
+            if curl --fail --silent --show-error \
+              "$APP_URL/health"; then
               echo
               echo "Application health check passed."
               exit 0
