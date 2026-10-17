@@ -8,6 +8,7 @@ on:
     paths:
       - "cloudformation/**"
       - ".github/workflows/deploy.yml"
+
   workflow_dispatch:
 
 permissions:
@@ -38,8 +39,22 @@ jobs:
           python - <<'PY'
           import yaml
 
+          class CloudFormationLoader(yaml.SafeLoader):
+              pass
+
+          def cloudformation_tag(loader, tag_suffix, node):
+              if isinstance(node, yaml.ScalarNode):
+                  return loader.construct_scalar(node)
+              if isinstance(node, yaml.SequenceNode):
+                  return loader.construct_sequence(node)
+              if isinstance(node, yaml.MappingNode):
+                  return loader.construct_mapping(node)
+              return None
+
+          CloudFormationLoader.add_multi_constructor("!", cloudformation_tag)
+
           with open("cloudformation/template.yaml", encoding="utf-8") as file:
-              template = yaml.safe_load(file)
+              template = yaml.load(file, Loader=CloudFormationLoader)
 
           assert isinstance(template, dict), "Template must be a YAML mapping"
           assert "Resources" in template, "Template must contain Resources"
