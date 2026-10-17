@@ -1,0 +1,84 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Social Lite basic EC2 Docker deployment using AWS Academy LabInstanceProfile
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC ID
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Existing public subnet ID
+
+  ImageUri:
+    Type: String
+    Default: "594070224181.dkr.ecr.us-east-1.amazonaws.com/social-lite-app:latest"
+    Description: Full Amazon ECR image URI including tag
+
+Resources:
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP traffic to Social Lite
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  SocialLiteInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      InstanceType: t3.micro
+      IamInstanceProfile: LabInstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+
+          dnf install -y docker awscli-2
+          systemctl enable --now docker
+
+          aws ecr get-login-password --region ${AWS::Region} |
+            docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+
+          docker pull ${ImageUri}
+          docker run -d --restart unless-stopped -p 80:5000 ${ImageUri}
+
+  CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Social Lite EC2 high CPU usage
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref SocialLiteInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+  AppURL:
+    Description: Social Lite application URL
+    Value: !Sub "http://${SocialLiteInstance.PublicDnsName}"
+
+  InstanceId:
+    Description: EC2 instance ID
+    Value: !Ref SocialLiteInstance
+
+  ECRImage:
+    Description: Docker image deployed
+    Value: !Ref ImageUri
+
+  SecurityGroupId:
+    Description: Security group for the application
+    Value: !Ref AppSecurityGroup
