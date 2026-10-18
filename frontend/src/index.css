@@ -1,0 +1,132 @@
+:root {
+    /* Fluid base size: ~17px on small laptops up to 22px on large monitors */
+    font-size: clamp(1.0625rem, 0.6vw + 0.625rem, 1.375rem);
+
+    --bg: #eef1f4;
+    --surface: #ffffff;
+    --text: #0f1720;
+    --text-soft: #3b4552;
+    --muted: #5a6573;
+    --border: #d9dee5;
+    --border-strong: #c3cad4;
+    --border-hover: #aeb8c6;
+    --accent: #2b44e8;
+    --accent-hover: #1a2da8;
+    --accent-soft: #e3e8fb;
+    --accent-ink: #1f2f8a;
+    --error: #b42318;
+
+    --font-display: "Bricolage Grotesque", "Helvetica Neue", sans-serif;
+    --font-body:
+        "Instrument Sans",
+        system-ui,
+        -apple-system,
+        "Segoe UI",
+        sans-serif;
+
+    font-family: var(--font-body);
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--bg);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+}
+
+a {
+    color: var(--accent);
+}
+
+a:hover {
+    color: var(--accent-hover);
+}
+
+button {
+    font: inherit;
+    cursor: pointer;
+}
+
+button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* pill buttons used across the header, cards and modals */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    height: 2.75rem;
+    padding: 0 1.375rem;
+    border-radius: 999px;
+    font-size: 0.9375rem;
+    font-weight: 600;
+}
+
+.btn-primary {
+    border: none;
+    background: var(--accent);
+    color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+}
+
+.btn-secondary {
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+}
+
+.btn-secondary:hover:not(:disabled) {
+    border-color: var(--border-hover);
+}
+
+/* round icon-only button, e.g. the close button on modals */
+.btn-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.75rem;
+    height: 2.75rem;
+    flex: none;
+    border: none;
+    border-radius: 50%;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+}
+
+/* hover lift for clickable cards */
+.card-interactive {
+    transition:
+        border-color 0.15s ease,
+        box-shadow 0.15s ease,
+        transform 0.15s ease;
+}
+
+.card-interactive:hover {
+    border-color: var(--border-hover);
+    box-shadow: 0 0.625rem 1.75rem rgba(15, 23, 32, 0.08);
+    transform: translateY(-1px);
+}
