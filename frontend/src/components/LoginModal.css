@@ -1,0 +1,9 @@
+.login-modal {
+    max-width: 25rem;
+}
+
+.login-submit {
+    height: 3rem;
+    margin-top: 0.25rem;
+    font-size: 1rem;
+}

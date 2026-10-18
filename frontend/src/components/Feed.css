@@ -1,0 +1,23 @@
+.feed {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.feed-heading {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 2.25rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+}
+
+.feed-status {
+    margin: 0;
+    text-align: center;
+    color: var(--muted);
+}
+
+.feed-error {
+    color: var(--error);
+}
