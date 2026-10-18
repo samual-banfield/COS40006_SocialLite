@@ -3,26 +3,26 @@ const authService = require("../auth/auth.service");
 
 const notFound = (res) => res.status(404).json({ error: "post not found" });
 
-exports.getPost = (req, res) => {
-    const post = postService.getPost(req.params.id);
+exports.getPost = async (req, res) => {
+    // getPost is also used after liking, where requireAuth has already set req.user
+    const user = req.user ?? authService.userFromHeader(req.headers.authorization);
+    const post = await postService.getPost(req.params.id, user?.id);
     if (!post) return notFound(res);
-    const username = authService.usernameFromHeader(req.headers.authorization);
-    res.json(postService.withLikes(post, username));
+    res.json(post);
 };
 
-exports.createPost = (req, res) => {
+exports.createPost = async (req, res) => {
     const { title, content } = req.body;
-    const { username } = req.user;
-    const post = postService.createPost({ username, title, content });
-    res.status(201).json(postService.withLikes(post, username));
+    const post = await postService.createPost({ authorId: req.user.id, title, content });
+    res.status(201).json(post);
 };
 
-exports.likePost = (req, res) => {
-    if (!postService.likePost(req.params.id, req.user.username)) return notFound(res);
-    exports.getPost(req, res);
+exports.likePost = async (req, res) => {
+    if (!(await postService.likePost(req.params.id, req.user.id))) return notFound(res);
+    await exports.getPost(req, res);
 };
 
-exports.unlikePost = (req, res) => {
-    if (!postService.unlikePost(req.params.id, req.user.username)) return notFound(res);
-    exports.getPost(req, res);
+exports.unlikePost = async (req, res) => {
+    if (!(await postService.unlikePost(req.params.id, req.user.id))) return notFound(res);
+    await exports.getPost(req, res);
 };

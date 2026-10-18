@@ -48,11 +48,7 @@ function PostView({ post, user, onBack, onToggleLike }) {
             </button>
 
             <article className="card post-view-article">
-                <PostAuthor
-                    username={post.username}
-                    createdAt={post.createdAt}
-                    size="lg"
-                />
+                <PostAuthor username={post.username} size="lg" />
                 {post.title && <h1 className="post-view-title">{post.title}</h1>}
                 {post.image && (
                     <img className="post-view-image" src={post.image} alt="" />

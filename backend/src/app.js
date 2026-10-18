@@ -1,17 +1,4 @@
-const fs = require("fs");
-const path = require("path");
-const { parseEnv } = require("util");
-
-// load backend/.env if it exists, real environment variables take priority.
-// not using process.loadEnvFile because it doesn't reach jest's sandboxed process.env
-try {
-    const vars = parseEnv(fs.readFileSync(path.join(__dirname, "..", ".env"), "utf8"));
-    for (const [key, value] of Object.entries(vars)) {
-        process.env[key] ??= value;
-    }
-} catch (err) {
-    if (err.code !== "ENOENT") throw err;
-}
+require("./env");
 
 const express = require("express");
 const app = express();
@@ -23,7 +10,6 @@ app.use("/api/post", require("./modules/post/post.route"));
 app.use("/api/feed", require("./modules/feed/feed.route"));
 app.use("/api/auth", require("./modules/auth/auth.route"));
 
-// unknown api routes
 app.use("/api", (req, res) => {
     res.status(404).json({ error: "route not found" });
 });

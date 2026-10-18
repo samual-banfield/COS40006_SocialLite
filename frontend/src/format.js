@@ -17,22 +17,6 @@ export function hueFor(username = "") {
     return Math.abs(hash) % 360;
 }
 
-// ISO timestamp -> "Just now", "12 min ago", "2 h ago", "3 d ago" or a date
-export function timeAgo(createdAt) {
-    if (!createdAt) return "";
-    const then = new Date(createdAt);
-    if (Number.isNaN(then.getTime())) return "";
-
-    const minutes = Math.floor((Date.now() - then.getTime()) / 60000);
-    if (minutes < 1) return "Just now";
-    if (minutes < 60) return `${minutes} min ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours} h ago`;
-    const days = Math.floor(hours / 24);
-    if (days < 7) return `${days} d ago`;
-    return then.toLocaleDateString();
-}
-
 // paragraphs are separated by blank lines
 export function paragraphsOf(content = "") {
     return content

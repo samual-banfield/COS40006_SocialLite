@@ -1,61 +1,59 @@
-const seedPosts = require("./post.seed");
+const prisma = require("../../db");
 
-const posts = seedPosts.map(({ likedBy, ...post }, i) => ({ id: i + 1, ...post }));
-let nextId = posts.length + 1;
+// likes only includes the logged in user's like, so we can tell if they liked it
+const postSelect = (userId) => ({
+    id: true,
+    title: true,
+    content: true,
+    image: true,
+    author: { select: { username: true } },
+    _count: { select: { likes: true } },
+    likes: userId ? { where: { userId }, select: { userId: true } } : false,
+});
 
-// postId -> Set of usernames, stands in for a likes(post_id, username) table
-const likes = new Map(
-    seedPosts.map(({ likedBy = [] }, i) => [i + 1, new Set(likedBy)]),
-);
+// turns the prisma result into the json the frontend expects
+const toResponse = ({ author, _count, likes, ...post }) => ({
+    ...post,
+    username: author.username,
+    likes: _count.likes,
+    likedByMe: Boolean(likes?.length),
+});
 
-exports.listPosts = () => {
-    return [...posts].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+exports.listPosts = async (userId) => {
+    const posts = await prisma.post.findMany({
+        select: postSelect(userId),
+        // newest posts first
+        orderBy: { id: "desc" },
+    });
+    return posts.map(toResponse);
 };
 
-exports.getPost = (id) => {
-    return posts.find((p) => p.id === id) ?? null;
+exports.getPost = async (id, userId) => {
+    const post = await prisma.post.findUnique({ where: { id }, select: postSelect(userId) });
+    return post ? toResponse(post) : null;
 };
 
-exports.createPost = ({ username, title, content }) => {
-    const post = {
-        id: nextId++,
-        username,
-        title,
-        content,
-        createdAt: new Date().toISOString(),
-    };
-    posts.push(post);
-    return post;
+exports.createPost = async ({ authorId, title, content }) => {
+    const post = await prisma.post.create({
+        data: { authorId, title, content },
+        select: postSelect(authorId),
+    });
+    return toResponse(post);
 };
 
-exports.countLikes = (id) => {
-    return likes.get(id)?.size ?? 0;
+const postExists = async (id) => {
+    return (await prisma.post.count({ where: { id } })) > 0;
 };
 
-exports.hasLiked = (id, username) => {
-    if (!username) return false;
-    return likes.get(id)?.has(username) ?? false;
-};
-
-// the shape sent to clients, likedByMe is false when nobody is logged in
-exports.withLikes = (post, username) => {
-    return {
-        ...post,
-        likes: exports.countLikes(post.id),
-        likedByMe: exports.hasLiked(post.id, username),
-    };
-};
-
-// liking and unliking are idempotent, both return true or false if the post doesn't exist
-exports.likePost = (id, username) => {
-    if (!exports.getPost(id)) return false;
-    if (!likes.has(id)) likes.set(id, new Set());
-    likes.get(id).add(username);
+// both return false if the post doesn't exist. liking twice or unliking twice does nothing
+exports.likePost = async (id, userId) => {
+    if (!(await postExists(id))) return false;
+    await prisma.like.createMany({ data: [{ postId: id, userId }], skipDuplicates: true });
     return true;
 };
 
-exports.unlikePost = (id, username) => {
-    if (!exports.getPost(id)) return false;
-    likes.get(id)?.delete(username);
+exports.unlikePost = async (id, userId) => {
+    if (!(await postExists(id))) return false;
+    await prisma.like.deleteMany({ where: { postId: id, userId } });
     return true;
 };
