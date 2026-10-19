@@ -1,0 +1,44 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model User {
+  id           Int    @id @default(autoincrement())
+  username     String @unique @db.VarChar(32)
+  passwordHash String @map("password_hash") @db.VarChar(72)
+
+  posts Post[]
+  likes Like[]
+
+  @@map("users")
+}
+
+model Post {
+  id       Int     @id @default(autoincrement())
+  authorId Int     @map("author_id")
+  title    String  @db.VarChar(100)
+  content  String  @db.VarChar(500)
+  image    String? @db.VarChar(2048)
+
+  author User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  likes  Like[]
+
+  @@map("posts")
+}
+
+// the (postId, userId) pair is the primary key, so a user can only like a post once
+model Like {
+  postId Int @map("post_id")
+  userId Int @map("user_id")
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@index([userId])
+  @@map("likes")
+}
