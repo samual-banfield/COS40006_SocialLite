@@ -2,82 +2,85 @@
 
 ## 1. Overview
 
-This deployment demonstrates a basic Social Lite Hello World application running in a Docker container on an AWS EC2 instance. Amazon ECR stores the Docker image, AWS CloudFormation defines the infrastructure, and GitHub Actions automates validation and application testing.
+This part of the project is a simple Hello World app for Social Lite. I used Docker to package the app and AWS to run it on an EC2 instance.
+
+The Docker image is stored in Amazon ECR. I used CloudFormation to define the AWS resources and GitHub Actions to check the template and test the app.
 
 ## 2. Application
 
-The application is located in the `hello-world` directory.
+The app is in the `hello-world` folder.
 
-- `app.py`: Flask web application.
-- `requirements.txt`: Python dependencies.
-- `Dockerfile`: Instructions for building the Docker image.
+The main files are:
 
-The application provides two endpoints:
+- `app.py`: The Flask application.
+- `requirements.txt`: The Python packages needed by the app.
+- `Dockerfile`: Used to build the Docker image.
 
-- `/`: Returns the Social Lite application response.
-- `/health`: Returns the application health status.
+There are two endpoints:
+
+- `/`: Returns the Social Lite app response.
+- `/health`: Returns the app's health status.
 
 ## 3. Amazon ECR
 
-The Docker image is stored in the private Amazon ECR repository `social-lite-app`.
+I created a private ECR repository called `social-lite-app` to store the Docker image.
 
 Image URI:
 
 `129371411537.dkr.ecr.us-east-1.amazonaws.com/social-lite-app:latest`
 
-To upload an updated image, authenticate Docker with Amazon ECR, tag the image with the repository URI, and push it to the repository. AWS credentials must be valid.
+To upload a new image, Docker needs to log in to ECR first. The image can then be tagged with the repository URI and pushed. Valid AWS credentials are required.
 
-## 4. AWS CloudFormation
+## 4. CloudFormation
 
-The infrastructure template is located at `cloudformation/template.yaml`.
+The template is in `cloudformation/template.yaml`.
 
-It defines:
+It defines the following resources:
 
-- An EC2 security group allowing HTTP traffic on port 80.
-- An EC2 instance running the Docker application.
+- A security group that allows HTTP traffic on port 80.
+- An EC2 instance to run the Docker app.
 - The existing AWS Academy `LabInstanceProfile`.
-- A CloudWatch alarm monitoring EC2 CPU utilisation.
-- Stack outputs for the application URL, instance ID, ECR image, and security group ID.
+- A CloudWatch alarm for EC2 CPU usage.
 
-The VPC and public subnet are supplied as parameters when creating or updating the stack.
+The template also provides outputs for the app URL, EC2 instance ID, ECR image and security group ID.
+
+The VPC ID and public subnet ID are provided as parameters when creating or updating the stack.
 
 ## 5. GitHub Actions
 
-The workflow is located at `.github/workflows/deploy.yml`.
+The workflow is in `.github/workflows/deploy.yml`.
 
-It runs when relevant deployment files are pushed to the `feature/cloudformation-deployment` branch, and can also be started manually using `workflow_dispatch`.
+It runs when relevant files are pushed to the `feature/cloudformation-deployment` branch. It can also be started manually.
 
-The workflow performs these checks:
+The workflow checks:
 
-1. Validates the CloudFormation template.
-2. Checks the CloudWatch alarm configuration.
-3. Tests the deployed application's health endpoint.
-4. Checks the application response.
+1. Whether the CloudFormation template is valid.
+2. Whether a CPU alarm is configured in the template.
+3. Whether the app's `/health` endpoint responds.
+4. Whether the main endpoint returns the expected app response.
 
-The workflow has been tested successfully. The latest recorded run completed both the CloudFormation validation and deployed-application testing jobs.
+The latest recorded workflow run passed both jobs.
 
-**Note:** The current workflow validates the template and tests the running application. It does not automatically create or update the CloudFormation stack, and it does not query CloudWatch alarm state through the AWS API.
+## 6. CloudWatch
 
-## 6. CloudWatch Monitoring
+CloudFormation defines a CPU utilisation alarm for the EC2 instance.
 
-The CloudFormation template defines a CPU utilisation alarm for the EC2 instance. The alarm threshold is 80%, evaluated over two periods of 300 seconds.
+The alarm uses a threshold of 80% CPU utilisation, with two evaluation periods of 300 seconds each.
 
-The alarm was checked in the AWS account and reported `OK` at the time of verification. This indicates that the alarm was not in an alarm state at that time; it does not guarantee that the application will always be healthy.
+When I checked the alarm in AWS, its state was `OK`. This means the alarm was not reporting a high-CPU condition at that time.
 
-## 7. Deployment Verification
+## 7. Testing
 
-The deployed application was tested using:
-
-`curl.exe -v --connect-timeout 5 http://75.101.214.182/health`
-
-The response was HTTP 200 with:
+I checked the deployed app using its health endpoint. The response was HTTP 200 with:
 
 `{"status":"healthy"}`
 
-The GitHub Actions workflow also completed successfully, with both jobs passing.
+The GitHub Actions workflow also passed its template validation and application testing jobs.
 
 ## 8. AWS Academy Limitations
 
-AWS Academy uses temporary credentials and restricts some IAM operations. Creating an IAM OpenID Connect provider for GitHub Actions was denied in this environment.
+AWS Academy uses temporary credentials and restricts some IAM operations.
 
-As a result, the current setup uses the existing AWS Academy instance profile for the EC2 instance. Automated AWS deployment from GitHub Actions requires suitable AWS permissions and authentication to be configured separately.
+I tried to set up an OpenID Connect provider for GitHub Actions, but AWS denied permission to create it. Because of this, the current workflow does not automatically deploy the CloudFormation stack or query the CloudWatch alarm through the AWS API.
+
+The EC2 instance uses the existing AWS Academy instance profile. Automated deployment from GitHub Actions would need a supported AWS authentication method and the required permissions.
