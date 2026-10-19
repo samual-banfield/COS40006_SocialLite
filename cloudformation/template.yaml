@@ -2,58 +2,88 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: Social Lite basic EC2 Docker deployment using AWS Academy LabInstanceProfile
 
+# Parameters are values supplied when creating the CloudFormation stack.
 Parameters:
+  # The VPC where the application EC2 instance will run.
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: Existing VPC ID
 
+  # The public subnet where the instance will be placed.
+  # It must belong to the VPC selected above.
   SubnetId:
     Type: AWS::EC2::Subnet::Id
     Description: Existing public subnet ID
 
+  # The Docker image that EC2 will download from Amazon ECR.
+  # The default points to the Social Lite image in this AWS account.
   ImageUri:
     Type: String
     Default: "129371411537.dkr.ecr.us-east-1.amazonaws.com/social-lite-app:latest"
     Description: Full Amazon ECR image URI including tag
 
 Resources:
+  # Security group acting as a firewall for the application.
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Allow HTTP traffic to Social Lite
       VpcId: !Ref VpcId
       SecurityGroupIngress:
+        # Allow incoming HTTP traffic on port 80 from any IPv4 address.
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
 
+  # EC2 virtual machine that runs the Social Lite Docker container.
   SocialLiteInstance:
     Type: AWS::EC2::Instance
     Properties:
+      # Retrieve the latest Amazon Linux 2023 AMI ID from Systems Manager.
       ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+
+      # Small instance size suitable for this basic prototype.
       InstanceType: t3.micro
+
+      # Use the existing AWS Academy instance profile.
+      # The profile must have the permissions needed to pull the ECR image.
       IamInstanceProfile: LabInstanceProfile
+
       NetworkInterfaces:
         - AssociatePublicIpAddress: true
           DeviceIndex: "0"
           GroupSet:
             - !Ref AppSecurityGroup
           SubnetId: !Ref SubnetId
+
+      # UserData runs automatically when the instance first starts.
+      # It installs Docker, logs in to ECR, downloads the image,
+      # and starts the application container.
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -eux
 
+          # Install Docker and the AWS CLI.
           dnf install -y docker awscli-2
+
+          # Start Docker now and enable it after future restarts.
           systemctl enable --now docker
 
+          # Authenticate Docker with Amazon ECR in the current AWS region.
           aws ecr get-login-password --region ${AWS::Region} |
             docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
 
+          # Download the configured Social Lite image.
           docker pull ${ImageUri}
+
+          # Start the container in the background.
+          # Host port 80 forwards requests to container port 5000.
+          # Restart the container automatically if it stops.
           docker run -d --restart unless-stopped -p 80:5000 ${ImageUri}
 
+  # Monitor average CPU usage on the EC2 instance.
   CPUAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -64,24 +94,34 @@ Resources:
         - Name: InstanceId
           Value: !Ref SocialLiteInstance
       Statistic: Average
+
+      # Each evaluation period is five minutes.
       Period: 300
+
+      # Check two consecutive evaluation periods.
       EvaluationPeriods: 2
+
+      # Trigger the alarm if average CPU usage exceeds 80%.
       Threshold: 80
       ComparisonOperator: GreaterThanThreshold
 
 Outputs:
+  # Public URL for accessing the deployed application.
   AppURL:
     Description: Social Lite application URL
     Value: !Sub "http://${SocialLiteInstance.PublicIp}"
 
+  # Return the EC2 instance ID for identification and troubleshooting.
   InstanceId:
     Description: EC2 instance ID
     Value: !Ref SocialLiteInstance
 
+  # Return the Docker image URI used for deployment.
   ECRImage:
     Description: Docker image deployed
     Value: !Ref ImageUri
 
+  # Return the security group ID for network troubleshooting.
   SecurityGroupId:
     Description: Security group for the application
     Value: !Ref AppSecurityGroup
