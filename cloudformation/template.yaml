@@ -13,7 +13,7 @@ Parameters:
 
   ImageUri:
     Type: String
-    Default: "594070224181.dkr.ecr.us-east-1.amazonaws.com/social-lite-app:latest"
+    Default: "129371411537.dkr.ecr.us-east-1.amazonaws.com/social-lite-app:latest"
     Description: Full Amazon ECR image URI including tag
 
 Resources:
@@ -34,9 +34,12 @@ Resources:
       ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
       InstanceType: t3.micro
       IamInstanceProfile: LabInstanceProfile
-      SubnetId: !Ref SubnetId
-      SecurityGroupIds:
-        - !Ref AppSecurityGroup
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref AppSecurityGroup
+          SubnetId: !Ref SubnetId
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -69,7 +72,7 @@ Resources:
 Outputs:
   AppURL:
     Description: Social Lite application URL
-    Value: !Sub "http://${SocialLiteInstance.PublicDnsName}"
+    Value: !Sub "http://${SocialLiteInstance.PublicIp}"
 
   InstanceId:
     Description: EC2 instance ID
