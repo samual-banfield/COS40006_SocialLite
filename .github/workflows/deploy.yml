@@ -64,19 +64,68 @@ jobs:
                   Loader=CloudFormationLoader
               )
 
-          assert isinstance(
-              template, dict
-          ), "Template must be a YAML mapping"
-
+          assert isinstance(template, dict), (
+              "Template must be a YAML mapping"
+          )
           assert "Resources" in template, (
               "Template must contain Resources"
           )
-
           assert "Parameters" in template, (
               "Template must contain Parameters"
           )
 
           print("CloudFormation YAML structure looks valid.")
+          PY
+
+      - name: Check CloudWatch alarm configuration
+        run: |
+          python - <<'PY'
+          import yaml
+
+          class CloudFormationLoader(yaml.SafeLoader):
+              pass
+
+          def cloudformation_tag(loader, tag_suffix, node):
+              if isinstance(node, yaml.ScalarNode):
+                  return loader.construct_scalar(node)
+              if isinstance(node, yaml.SequenceNode):
+                  return loader.construct_sequence(node)
+              if isinstance(node, yaml.MappingNode):
+                  return loader.construct_mapping(node)
+              return None
+
+          CloudFormationLoader.add_multi_constructor(
+              "!", cloudformation_tag
+          )
+
+          with open(
+              "cloudformation/template.yaml",
+              encoding="utf-8"
+          ) as file:
+              template = yaml.load(
+                  file,
+                  Loader=CloudFormationLoader
+              )
+
+          alarms = [
+              resource
+              for resource in template["Resources"].values()
+              if resource.get("Type") == "AWS::CloudWatch::Alarm"
+          ]
+
+          assert alarms, "No CloudWatch alarm found in template"
+
+          cpu_alarms = [
+              alarm for alarm in alarms
+              if alarm.get("Properties", {}).get("MetricName")
+              == "CPUUtilization"
+          ]
+
+          assert cpu_alarms, (
+              "No CPUUtilization alarm found in template"
+          )
+
+          print("CloudWatch CPU alarm configuration found.")
           PY
 
   smoke-test:
@@ -116,3 +165,4 @@ jobs:
           echo "$RESPONSE" | grep -q '"status":"running"'
 
           echo "Application response test passed."
+
