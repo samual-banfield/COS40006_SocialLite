@@ -136,7 +136,7 @@ jobs:
     steps:
       - name: Check application health
         run: |
-          APP_URL="http://ec2-18-209-212-78.compute-1.amazonaws.com"
+          APP_URL="http://75.101.214.182"
 
           for attempt in $(seq 1 12); do
             if curl --fail --silent --show-error \
@@ -155,7 +155,7 @@ jobs:
 
       - name: Test application response
         run: |
-          APP_URL="http://ec2-18-209-212-78.compute-1.amazonaws.com"
+          APP_URL="http://75.101.214.182"
 
           RESPONSE=$(curl --fail --silent --show-error "$APP_URL/")
 
@@ -165,4 +165,3 @@ jobs:
           echo "$RESPONSE" | grep -q '"status":"running"'
 
           echo "Application response test passed."
-
