@@ -71,11 +71,17 @@ When I checked the alarm in AWS, its state was `OK`. This means the alarm was no
 
 ## 7. Testing
 
-I checked the deployed app using its health endpoint. The response was HTTP 200 with:
+I tested the deployed application using AWS CloudShell.
 
-`{"status":"healthy"}`
+The health endpoint returned HTTP 200 with:
 
-The GitHub Actions workflow also passed its template validation and application testing jobs.
+{"status":"healthy"}
+
+The main endpoint returned:
+
+{"application":"Social Lite","message":"Hello World","status":"running"}
+
+The GitHub Actions workflow also passed its CloudFormation validation and application testing jobs.
 
 ## 8. AWS Academy Limitations
 
