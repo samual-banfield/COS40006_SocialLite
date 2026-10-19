@@ -7,8 +7,8 @@ on:
       - feature/cloudformation-deployment
     paths:
       - "cloudformation/**"
+      - "e2e/**"
       - ".github/workflows/deploy.yml"
-
   workflow_dispatch:
 
 permissions:
@@ -55,24 +55,12 @@ jobs:
               "!", cloudformation_tag
           )
 
-          with open(
-              "cloudformation/template.yaml",
-              encoding="utf-8"
-          ) as file:
-              template = yaml.load(
-                  file,
-                  Loader=CloudFormationLoader
-              )
+          with open("cloudformation/template.yaml", encoding="utf-8") as file:
+              template = yaml.load(file, Loader=CloudFormationLoader)
 
-          assert isinstance(template, dict), (
-              "Template must be a YAML mapping"
-          )
-          assert "Resources" in template, (
-              "Template must contain Resources"
-          )
-          assert "Parameters" in template, (
-              "Template must contain Parameters"
-          )
+          assert isinstance(template, dict), "Template must be a YAML mapping"
+          assert "Resources" in template, "Template must contain Resources"
+          assert "Parameters" in template, "Template must contain Parameters"
 
           print("CloudFormation YAML structure looks valid.")
           PY
@@ -98,14 +86,8 @@ jobs:
               "!", cloudformation_tag
           )
 
-          with open(
-              "cloudformation/template.yaml",
-              encoding="utf-8"
-          ) as file:
-              template = yaml.load(
-                  file,
-                  Loader=CloudFormationLoader
-              )
+          with open("cloudformation/template.yaml", encoding="utf-8") as file:
+              template = yaml.load(file, Loader=CloudFormationLoader)
 
           alarms = [
               resource
@@ -121,9 +103,7 @@ jobs:
               == "CPUUtilization"
           ]
 
-          assert cpu_alarms, (
-              "No CPUUtilization alarm found in template"
-          )
+          assert cpu_alarms, "No CPUUtilization alarm found in template"
 
           print("CloudWatch CPU alarm configuration found.")
           PY
@@ -139,8 +119,7 @@ jobs:
           APP_URL="http://75.101.214.182"
 
           for attempt in $(seq 1 12); do
-            if curl --fail --silent --show-error \
-              "$APP_URL/health"; then
+            if curl --fail --silent --show-error "$APP_URL/health"; then
               echo
               echo "Application health check passed."
               exit 0
@@ -156,12 +135,36 @@ jobs:
       - name: Test application response
         run: |
           APP_URL="http://75.101.214.182"
-
           RESPONSE=$(curl --fail --silent --show-error "$APP_URL/")
 
           echo "$RESPONSE"
-
           echo "$RESPONSE" | grep -q '"application":"Social Lite"'
           echo "$RESPONSE" | grep -q '"status":"running"'
 
           echo "Application response test passed."
+
+  e2e-test:
+    name: Playwright E2E Tests
+    runs-on: ubuntu-latest
+    needs: smoke-test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        run: |
+          npm init -y
+          npm install --save-dev @playwright/test
+          npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        env:
+          APP_URL: http://75.101.214.182
+        run: npx playwright test e2e/hello-world.spec.js
+
