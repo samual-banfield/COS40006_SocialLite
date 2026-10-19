@@ -1,7 +1,7 @@
 
 const { test, expect } = require('@playwright/test');
 
-const APP_URL = process.env.APP_URL || 'http://75.101.214.182';
+const APP_URL = process.env.APP_URL || 'http://44.192.123.80';
 
 test('Social Lite home page returns the expected response', async ({ request }) => {
   const response = await request.get(`${APP_URL}/`);

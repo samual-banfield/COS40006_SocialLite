@@ -116,7 +116,7 @@ jobs:
     steps:
       - name: Check application health
         run: |
-          APP_URL="http://75.101.214.182"
+          APP_URL="http://44.192.123.80"
 
           for attempt in $(seq 1 12); do
             if curl --fail --silent --show-error "$APP_URL/health"; then
@@ -134,7 +134,7 @@ jobs:
 
       - name: Test application response
         run: |
-          APP_URL="http://75.101.214.182"
+          APP_URL="http://44.192.123.80"
           RESPONSE=$(curl --fail --silent --show-error "$APP_URL/")
 
           echo "$RESPONSE"
@@ -165,6 +165,6 @@ jobs:
 
       - name: Run Playwright tests
         env:
-          APP_URL: http://75.101.214.182
+          APP_URL: http://44.192.123.80
         run: npx playwright test e2e/hello-world.spec.js
 
