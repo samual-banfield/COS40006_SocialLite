@@ -2,7 +2,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const prisma = require("../../db");
 
-// this is grabbed from the .env file in the repo root
+// .env file in the repo root
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = "1d";
 

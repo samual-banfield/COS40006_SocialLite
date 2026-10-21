@@ -14,17 +14,12 @@ Running with Docker (no local MySQL needed):
   `docker compose down` stops everything and keeps the data, `docker compose down -v` also wipes the database.
   Run any backend script inside the container the same way, e.g. `docker compose run --rm backend npm test`
 
-First time setup (without Docker):
-  1. install and start a MySQL server (8.x) locally
-  2. from the repo root, copy .env.example to .env, fill in JWT_SECRET and set DATABASE_URL to your MySQL user, password and port
-  3. from /backend, `npm i` (also runs `prisma generate`)
-  4. `npm run db:reset` creates the tables from the migrations and seeds them
-
 Every seeded user (test, dev, user, lorem.ipsum, dolor_sit, consectetur) has the password "password".
 
 Scripts:
   npm run db:migrate   after editing schema.prisma, creates and applies a new migration
   npm run db:seed      wipes the data and re-inserts the seed data from prisma/seed.js
   npm run db:reset     drops the database, re-applies every migration and seeds it
+  npm test             runs the Jest test suites and places the results into /coverage 
 
 After changing schema.prisma, run `npx prisma generate` if the client types look out of date.
