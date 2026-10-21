@@ -1,9 +1,13 @@
 require("./env");
 
+const path = require("path");
 const express = require("express");
 const app = express();
 
 app.use(express.json());
+
+// Serve the built frontend. This folder only exists in the production Docker image.
+app.use(express.static(path.join(__dirname, "..", "public")));
 
 app.use("/api/health", require("./modules/health/health.route"));
 app.use("/api/post", require("./modules/post/post.route"));
@@ -17,7 +21,9 @@ app.use("/api", (req, res) => {
 // malformed json bodies and anything else that throws
 app.use((err, req, res, next) => {
     if (err.type === "entity.parse.failed") {
-        return res.status(400).json({ error: "request body must be valid json" });
+        return res
+            .status(400)
+            .json({ error: "request body must be valid json" });
     }
     console.error(err);
     res.status(500).json({ error: "internal server error" });

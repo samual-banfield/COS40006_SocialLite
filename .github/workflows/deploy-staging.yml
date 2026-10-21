@@ -1,0 +1,264 @@
+# Builds the app and replaces the staging server with a fresh one.
+#
+# Run by the Promote branches workflow after Development is merged into Staging,
+# or by hand from the Actions tab.
+#
+# Each run deletes the old staging stack, database included, so staging always
+# starts with fresh test data.
+#
+# Needs these secrets in the "staging" GitHub environment:
+#   AWS_ACCESS_KEY_ID      access key of the IAM user that deploys
+#   AWS_SECRET_ACCESS_KEY  secret for that access key
+#   DB_PASSWORD            letters and numbers only, at least 8 characters
+#   JWT_SECRET             at least 16 characters
+
+name: Deploy staging
+
+on:
+    workflow_call:
+        inputs:
+            ref:
+                description: Branch or commit to deploy
+                type: string
+                default: Staging
+        outputs:
+            app_url:
+                description: URL of the deployed staging app
+                value: ${{ jobs.deploy.outputs.app_url }}
+    workflow_dispatch:
+        inputs:
+            ref:
+                description: Branch or commit to deploy
+                type: string
+                default: Staging
+
+permissions:
+    contents: read
+
+# Two runs at once would delete each other's stack
+concurrency:
+    group: deploy-staging
+    cancel-in-progress: false
+
+env:
+    AWS_REGION: ap-southeast-2
+    STACK_NAME: social-lite-staging
+    IMAGE_REPOSITORY: social-lite-app
+    TEMPLATE: cloudformation/app-server.yaml
+
+jobs:
+    validate-template:
+        name: Validate CloudFormation
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.ref }}
+
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+
+            - run: pip install PyYAML
+
+            # Checks the template is valid YAML and has a CPU alarm
+            - name: Check template
+              run: |
+                  python - <<'PY'
+                  import os, yaml
+
+                  # Read CloudFormation tags like !Ref as plain values
+                  class Loader(yaml.SafeLoader):
+                      pass
+
+                  def any_tag(loader, suffix, node):
+                      if isinstance(node, yaml.ScalarNode):
+                          return loader.construct_scalar(node)
+                      if isinstance(node, yaml.SequenceNode):
+                          return loader.construct_sequence(node)
+                      return loader.construct_mapping(node)
+
+                  Loader.add_multi_constructor("!", any_tag)
+
+                  with open(os.environ["TEMPLATE"], encoding="utf-8") as file:
+                      template = yaml.load(file, Loader=Loader)
+
+                  assert isinstance(template, dict), "Template must be a YAML mapping"
+                  assert "Parameters" in template, "Template has no Parameters"
+                  assert "Resources" in template, "Template has no Resources"
+                  print("Template structure is valid.")
+
+                  cpu_alarms = [
+                      resource for resource in template["Resources"].values()
+                      if resource.get("Type") == "AWS::CloudWatch::Alarm"
+                      and resource.get("Properties", {}).get("MetricName") == "CPUUtilization"
+                  ]
+                  assert cpu_alarms, "Template has no CPU alarm"
+                  print("CPU alarm found.")
+                  PY
+
+    deploy:
+        name: Build image and replace staging
+        runs-on: ubuntu-latest
+        needs: validate-template
+        environment:
+            name: staging
+            url: ${{ steps.stack.outputs.app_url }}
+        outputs:
+            app_url: ${{ steps.stack.outputs.app_url }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.ref }}
+
+            - name: Log in to AWS
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ env.AWS_REGION }}
+
+            - name: Log in to ECR
+              id: ecr
+              uses: aws-actions/amazon-ecr-login@v2
+
+            # Tag the image with the commit it was built from
+            - name: Build and push image
+              id: image
+              env:
+                  REGISTRY: ${{ steps.ecr.outputs.registry }}
+              run: |
+                  set -euo pipefail
+                  TAG=$(git rev-parse --short=12 HEAD)
+                  IMAGE="$REGISTRY/$IMAGE_REPOSITORY:$TAG"
+
+                  docker build -t "$IMAGE" .
+                  docker push "$IMAGE"
+
+                  echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+            - name: Find the default VPC and subnet
+              id: network
+              run: |
+                  set -euo pipefail
+                  VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true \
+                    --query "Vpcs[0].VpcId" --output text)
+
+                  if [ "$VPC_ID" = "None" ]; then
+                    echo "::error::No default VPC in $AWS_REGION. Create one with: aws ec2 create-default-vpc --region $AWS_REGION"
+                    exit 1
+                  fi
+
+                  # Default subnets are public, which the app needs
+                  SUBNET_ID=$(aws ec2 describe-subnets \
+                    --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true \
+                    --query "sort_by(Subnets, &AvailabilityZone)[0].SubnetId" --output text)
+
+                  echo "Using VPC $VPC_ID and subnet $SUBNET_ID"
+                  echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
+                  echo "subnet_id=$SUBNET_ID" >> "$GITHUB_OUTPUT"
+
+            - name: Delete the old staging stack
+              run: |
+                  set -euo pipefail
+                  if aws cloudformation describe-stacks --stack-name "$STACK_NAME" > /dev/null 2>&1; then
+                    echo "Deleting $STACK_NAME..."
+                    aws cloudformation delete-stack --stack-name "$STACK_NAME"
+                    aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+                  else
+                    echo "No existing $STACK_NAME stack."
+                  fi
+
+            - name: Create the new staging stack
+              env:
+                  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+                  JWT_SECRET: ${{ secrets.JWT_SECRET }}
+                  VPC_ID: ${{ steps.network.outputs.vpc_id }}
+                  SUBNET_ID: ${{ steps.network.outputs.subnet_id }}
+                  IMAGE_TAG: ${{ steps.image.outputs.tag }}
+              run: |
+                  aws cloudformation deploy \
+                    --stack-name "$STACK_NAME" \
+                    --template-file "$TEMPLATE" \
+                    --capabilities CAPABILITY_IAM \
+                    --parameter-overrides \
+                      VpcId="$VPC_ID" \
+                      SubnetId="$SUBNET_ID" \
+                      ImageRepository="$IMAGE_REPOSITORY" \
+                      ImageTag="$IMAGE_TAG" \
+                      DbPassword="$DB_PASSWORD" \
+                      JwtSecret="$JWT_SECRET" \
+                      SeedDatabase=true
+
+            - name: Show why the stack failed
+              if: failure()
+              run: |
+                  aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
+                    --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
+                    --output table || true
+
+            - name: Get the app URL
+              id: stack
+              run: |
+                  set -euo pipefail
+                  APP_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                    --query "Stacks[0].Outputs[?OutputKey=='AppURL'].OutputValue" --output text)
+
+                  echo "Staging is at $APP_URL"
+                  echo "app_url=$APP_URL" >> "$GITHUB_OUTPUT"
+
+    smoke-test:
+        name: Test deployed application
+        runs-on: ubuntu-latest
+        needs: deploy
+        env:
+            APP_URL: ${{ needs.deploy.outputs.app_url }}
+        steps:
+            # The stack is done once the server is running, but the server still has
+            # to install Docker and set up MySQL, so wait up to 10 minutes
+            - name: Wait for the app to start
+              run: |
+                  for attempt in $(seq 1 40); do
+                    if curl --fail --silent --show-error "$APP_URL/api/health"; then
+                      echo
+                      echo "Health check passed."
+                      exit 0
+                    fi
+
+                    echo "Attempt $attempt failed. Retrying in 15 seconds..."
+                    sleep 15
+                  done
+
+                  echo "Health check failed."
+                  exit 1
+
+            - name: Check the home page loads
+              run: |
+                  # Save the page first. Piping curl into grep -q can fail when grep exits early.
+                  PAGE=$(curl --fail --silent --show-error "$APP_URL/")
+                  echo "$PAGE" | grep -q '<title>SocialLite</title>'
+                  echo "Home page check passed."
+
+    e2e-test:
+        name: Playwright E2E Tests
+        runs-on: ubuntu-latest
+        needs: [deploy, smoke-test]
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.ref }}
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: "20"
+
+            - name: Install Playwright
+              run: |
+                  npm init -y
+                  npm install --save-dev @playwright/test
+                  npx playwright install --with-deps chromium
+
+            - name: Run Playwright tests
+              env:
+                  APP_URL: ${{ needs.deploy.outputs.app_url }}
+              run: npx playwright test e2e/app.spec.js

@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EC2 server that runs Social Lite and MySQL in Docker
+
+# The deploy-staging workflow creates this stack. It needs the ECR repository
+# from ecr-repository.yaml to exist first.
+
+Parameters:
+    VpcId:
+        Type: AWS::EC2::VPC::Id
+        Description: VPC to run the server in
+
+    # Must be a public subnet inside the VPC above
+    SubnetId:
+        Type: AWS::EC2::Subnet::Id
+        Description: Public subnet for the server
+
+    ImageRepository:
+        Type: String
+        Default: social-lite-app
+        Description: ECR repository name
+
+    ImageTag:
+        Type: String
+        Default: latest
+        Description: Image tag to deploy
+
+    # Letters and numbers only, as symbols break the database URL
+    DbPassword:
+        Type: String
+        NoEcho: true
+        MinLength: 8
+        AllowedPattern: "[A-Za-z0-9]+"
+        ConstraintDescription: Must be at least 8 letters or numbers
+        Description: MySQL root password
+
+    JwtSecret:
+        Type: String
+        NoEcho: true
+        MinLength: 16
+        Description: Secret used to sign login tokens
+
+    # Seeding replaces all users and posts with test data
+    SeedDatabase:
+        Type: String
+        Default: "true"
+        AllowedValues: ["true", "false"]
+        Description: Fill the database with test data on first start
+
+Resources:
+    # Firewall: only allow web traffic in
+    SecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allow HTTP traffic to Social Lite
+            VpcId: !Ref VpcId
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 80
+                  ToPort: 80
+                  CidrIp: 0.0.0.0/0
+
+    # Lets the server pull images from ECR, and nothing else
+    InstanceRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service: ec2.amazonaws.com
+                      Action: sts:AssumeRole
+            ManagedPolicyArns:
+                - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+    InstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Roles:
+                - !Ref InstanceRole
+
+    Server:
+        Type: AWS::EC2::Instance
+        Properties:
+            ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+            # Need to go with small over micro to have enough space for the app and MySQL
+            InstanceType: t3.small
+            IamInstanceProfile: !Ref InstanceProfile
+            NetworkInterfaces:
+                - AssociatePublicIpAddress: true
+                  DeviceIndex: "0"
+                  GroupSet:
+                      - !Ref SecurityGroup
+                  SubnetId: !Ref SubnetId
+
+            # Runs once when the server first boots
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    # Stop on any error. No -x, so passwords aren't printed to the logs.
+                    set -eu
+
+                    # Install and start Docker
+                    dnf install -y docker awscli-2
+                    systemctl enable --now docker
+
+                    # Log in to ECR and download the app image
+                    aws ecr get-login-password --region ${AWS::Region} |
+                      docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+                    IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ImageRepository}:${ImageTag}
+                    docker pull $IMAGE
+
+                    # allowPublicKeyRetrieval lets the app log in to MySQL 8 without TLS
+                    DATABASE_URL='mysql://root:${DbPassword}@mysql:3306/sociallite?allowPublicKeyRetrieval=true'
+
+                    # Private network so the containers can reach each other by name
+                    docker network create sociallite
+
+                    # Start MySQL. Its data is kept in a volume, and only the app can reach it.
+                    docker run -d --restart unless-stopped --name mysql --network sociallite \
+                      -e MYSQL_ROOT_PASSWORD='${DbPassword}' -e MYSQL_DATABASE=sociallite \
+                      -v mysql-data:/var/lib/mysql mysql:8.4
+
+                    until docker exec mysql mysqladmin ping -h 127.0.0.1 -uroot -p'${DbPassword}' --silent; do
+                      sleep 5
+                    done
+
+                    # Create the tables and add test data
+                    if [ "${SeedDatabase}" = "true" ]; then
+                      docker run --rm --network sociallite -e DATABASE_URL="$DATABASE_URL" $IMAGE \
+                        sh -c "npx prisma migrate deploy && npx prisma db seed"
+                    fi
+
+                    # Start the app, with port 80 on the server going to port 3000 in the container
+                    docker run -d --restart unless-stopped --name app --network sociallite -p 80:3000 \
+                      -e DATABASE_URL="$DATABASE_URL" -e JWT_SECRET='${JwtSecret}' \
+                      $IMAGE
+
+    # Alarm when average CPU stays above 80% for 10 minutes (two 5 minute checks)
+    CPUAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite server CPU is high
+            Namespace: AWS/EC2
+            MetricName: CPUUtilization
+            Dimensions:
+                - Name: InstanceId
+                  Value: !Ref Server
+            Statistic: Average
+            Period: 300
+            EvaluationPeriods: 2
+            Threshold: 80
+            ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+    AppURL:
+        Description: Social Lite web address
+        Value: !Sub "http://${Server.PublicIp}"
+
+    InstanceId:
+        Description: EC2 instance ID
+        Value: !Ref Server
+
+    ECRImage:
+        Description: Docker image deployed
+        Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ImageRepository}:${ImageTag}"
+
+    SecurityGroupId:
+        Description: Security group for the server
+        Value: !Ref SecurityGroup
