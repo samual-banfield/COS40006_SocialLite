@@ -1,12 +1,12 @@
+const { Id } = require("../schemas");
+
+// checking that id is a valid positive whole integer, see schemas.js
 const validaId = function (req, res, next) {
-    const id = Number(req.params.id);
-    // checking that id is a valid positive whole integer
-    if (!Number.isInteger(id) || id <= 0) {
-        return res.status(400).json({
-            error: "id must be a positive integer",
-        });
+    const result = Id.safeParse(req.params.id);
+    if (!result.success) {
+        return res.status(400).json({ error: result.error.issues[0].message });
     }
-    req.params.id = Number(req.params.id);
+    req.params.id = result.data;
     next();
 };
 
