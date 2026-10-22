@@ -56,7 +56,7 @@ function Header({ user, onHome, onLogin, onLogout, onCompose }) {
                         className="btn btn-primary"
                         onClick={onLogin}
                     >
-                        Log in
+                        Log in / Sign up
                     </button>
                 )}
             </div>

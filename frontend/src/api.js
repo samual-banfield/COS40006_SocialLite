@@ -36,6 +36,14 @@ export function login({ username, password }) {
     });
 }
 
+// returns { token, user }, but the app logs in straight after rather than using it
+export function signup({ username, password }) {
+    return request("/api/auth/signup", {
+        method: "POST",
+        body: { username, password },
+    });
+}
+
 export async function getFeed() {
     const data = await request("/api/feed");
     return data.posts;
