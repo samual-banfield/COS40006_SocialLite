@@ -49,10 +49,12 @@ jobs:
             - name: Lint templates
               run: pipx run cfn-lint cloudformation/*.yaml
 
-            - name: Check the server has a CPU alarm
+            # Without this alarm, "Check no CloudWatch alarms are firing" can't tell when the app is down.
+            # Matches whole lines only, so a commented out alarm doesn't count.
+            - name: Check the server has a health check alarm
               run: |
-                  if ! grep -q 'MetricName: CPUUtilization' "$TEMPLATE"; then
-                    echo "::error file=$TEMPLATE,title=CloudWatch CPU alarm missing::$TEMPLATE has no CloudWatch alarm on CPUUtilization."
+                  if ! grep -qE '^\s*MetricName: HealthCheck\s*$' "$TEMPLATE"; then
+                    echo "::error file=$TEMPLATE,title=CloudWatch health check alarm missing::$TEMPLATE has no CloudWatch alarm on the HealthCheck metric."
                     exit 1
                   fi
 
@@ -272,7 +274,26 @@ jobs:
                     exit 1
                   fi
 
-            # ---- 4. Mark the image as tested ----
+            # ---- 4. Check CloudWatch ----
+            # The health check alarm needs 3 minutes of reports from the new version, so wait 4.
+            # CloudFormation starts every alarm's name with the stack name.
+            - name: Check no CloudWatch alarms are firing
+              run: |
+                  set -euo pipefail
+                  echo "Waiting 4 minutes for the alarms to see the new version..."
+                  sleep 240
+
+                  FIRING=$(aws cloudwatch describe-alarms \
+                    --alarm-name-prefix "$STACK_NAME-" --state-value ALARM \
+                    --query "MetricAlarms[].AlarmName" --output text)
+
+                  if [ -n "$FIRING" ]; then
+                    echo "::error title=CloudWatch alarms firing::These staging alarms are firing: $FIRING. Open them in the CloudWatch console to see why."
+                    exit 1
+                  fi
+                  echo "No CloudWatch alarms are firing."
+
+            # ---- 5. Mark the image as tested ----
             # Adds a second tag to the same image. Nothing is rebuilt or copied.
             - name: Tag the image as tested
               env:

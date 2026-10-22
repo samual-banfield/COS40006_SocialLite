@@ -101,7 +101,8 @@ Resources:
     # Policy changes are applied in place.
     # Recreated if: the role or profile is given a fixed name or path.
 
-    # Lets the server pull images from ECR and use its own image bucket, and nothing else
+    # Lets the server pull images from ECR, use its own image bucket and report its health
+    # check to CloudWatch, and nothing else
     InstanceRole:
         Type: AWS::IAM::Role
         Properties:
@@ -130,6 +131,17 @@ Resources:
                           - Effect: Allow
                             Action: s3:ListBucket
                             Resource: !Sub arn:${AWS::Partition}:s3:::${ImageBucket}
+                - PolicyName: ReportHealth
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          # PutMetricData can't be limited to a resource, only to a namespace
+                          - Effect: Allow
+                            Action: cloudwatch:PutMetricData
+                            Resource: "*"
+                            Condition:
+                                StringEquals:
+                                    cloudwatch:namespace: SocialLite
 
     InstanceProfile:
         Type: AWS::IAM::InstanceProfile
@@ -275,6 +287,48 @@ Resources:
                         EOF
                         systemctl enable --now update-app
 
+                        # 5. Write the health check script. It sends CloudWatch:
+                        #      HealthCheck        1 if /api/health (which also checks the database) is ok, 0 if not
+                        #      ResponseTime       how long /api/health took to answer, in milliseconds
+                        #      MemoryUsedPercent  memory in use, not counting what Linux can free for cache
+                        #      DiskUsedPercent    space used on the server's disk
+                        cat > /usr/local/bin/report-health <<'EOF'
+                        #!/bin/bash
+                        # curl prints a code of 000 if the app doesn't answer at all
+                        read -r CODE TIME_TAKEN < <(curl --silent --max-time 10 --output /dev/null \
+                          --write-out '%{http_code} %{time_total}' http://localhost/api/health)
+                        if [ "$CODE" = "200" ]; then HEALTHY=1; else HEALTHY=0; fi
+                        RESPONSE_MS=$(awk "BEGIN { printf \"%.0f\", $TIME_TAKEN * 1000 }")
+
+                        # MemAvailable comes after MemFree, so it is used when the kernel reports it
+                        MEMORY_USED=$(awk '/^MemTotal:/ { total = $2 } /^Mem(Free|Available):/ { free = $2 }
+                          END { printf "%.1f", 100 * (1 - free / total) }' /proc/meminfo)
+                        DISK_USED=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+
+                        STACK="Dimensions=[{Name=Stack,Value=${AWS::StackName}}]"
+                        aws cloudwatch put-metric-data --region ${AWS::Region} --namespace SocialLite --metric-data \
+                          "MetricName=HealthCheck,Value=$HEALTHY,$STACK" \
+                          "MetricName=ResponseTime,Unit=Milliseconds,Value=$RESPONSE_MS,$STACK" \
+                          "MetricName=MemoryUsedPercent,Unit=Percent,Value=$MEMORY_USED,$STACK" \
+                          "MetricName=DiskUsedPercent,Unit=Percent,Value=$DISK_USED,$STACK"
+                        EOF
+                        chmod +x /usr/local/bin/report-health
+
+                        # 6. Run the health check every minute
+                        cat > /etc/systemd/system/report-health.service <<'EOF'
+                        [Unit]
+                        Description=Report Social Lite's health to CloudWatch
+                        After=network-online.target
+
+                        [Service]
+                        ExecStart=/bin/bash -c 'while true; do /usr/local/bin/report-health || echo "Could not send the health check to CloudWatch."; sleep 60; done'
+                        Restart=always
+
+                        [Install]
+                        WantedBy=multi-user.target
+                        EOF
+                        systemctl enable --now report-health
+
     Server:
         Type: AWS::EC2::Instance
         Properties:
@@ -314,6 +368,160 @@ Resources:
             Period: 300
             EvaluationPeriods: 2
             Threshold: 80
+            ComparisonOperator: GreaterThanThreshold
+
+    # Alarm when AWS finds a hardware or network problem with the server for 2 minutes,
+    # and move the server to healthy hardware. It keeps its disk, IP and instance ID.
+    StatusCheckAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite server failed its AWS status check, recovering it
+            Namespace: AWS/EC2
+            MetricName: StatusCheckFailed_System
+            Dimensions:
+                - Name: InstanceId
+                  Value: !Ref Server
+            Statistic: Maximum
+            Period: 60
+            EvaluationPeriods: 2
+            Threshold: 0
+            ComparisonOperator: GreaterThanThreshold
+            AlarmActions:
+                - !Sub arn:aws:automate:${AWS::Region}:ec2:recover
+
+    # Alarm when the app or its database has been down for 3 minutes (sent by report-health
+    # on the server). Maximum means it only fires if no server is healthy, so the old server
+    # covers for a new one while it starts. No data means the server itself is down.
+    HealthCheckAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite is down, /api/health is failing or not being reported
+            Namespace: SocialLite
+            MetricName: HealthCheck
+            Dimensions:
+                - Name: Stack
+                  Value: !Ref AWS::StackName
+            Statistic: Maximum
+            Period: 60
+            EvaluationPeriods: 3
+            Threshold: 1
+            ComparisonOperator: LessThanThreshold
+            TreatMissingData: breaching
+
+    # Alarm when /api/health has averaged over 1 second for 5 minutes. It normally answers in
+    # well under 100 ms, as it only runs SELECT 1, so this means the app or database is struggling.
+    ResponseTimeAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite is responding slowly
+            Namespace: SocialLite
+            MetricName: ResponseTime
+            Dimensions:
+                - Name: Stack
+                  Value: !Ref AWS::StackName
+            Statistic: Average
+            Period: 60
+            EvaluationPeriods: 5
+            Threshold: 1000
+            ComparisonOperator: GreaterThanThreshold
+
+    # Alarm when the server has averaged over 90% of its memory in use for 5 minutes.
+    # A deploy can reach this for a minute or two, so a short spike doesn't count.
+    MemoryAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite server is low on memory
+            Namespace: SocialLite
+            MetricName: MemoryUsedPercent
+            Dimensions:
+                - Name: Stack
+                  Value: !Ref AWS::StackName
+            Statistic: Average
+            Period: 60
+            EvaluationPeriods: 5
+            Threshold: 90
+            ComparisonOperator: GreaterThanThreshold
+
+    # Alarm when the server's disk is over 85% full. Old images are removed on every update,
+    # so this usually means logs are building up.
+    DiskAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite server disk is almost full
+            Namespace: SocialLite
+            MetricName: DiskUsedPercent
+            Dimensions:
+                - Name: Stack
+                  Value: !Ref AWS::StackName
+            Statistic: Maximum
+            Period: 300
+            EvaluationPeriods: 1
+            Threshold: 85
+            ComparisonOperator: GreaterThanThreshold
+
+    # Alarm when the database has less than 2 GB (10%) of storage left. A full database stops writes.
+    DatabaseStorageAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite database is almost out of storage
+            Namespace: AWS/RDS
+            MetricName: FreeStorageSpace
+            Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: !Ref Database
+            Statistic: Minimum
+            Period: 300
+            EvaluationPeriods: 1
+            Threshold: 2147483648
+            ComparisonOperator: LessThanThreshold
+
+    # Alarm when the database has had less than 100 MB of its 1 GB memory free for 10 minutes
+    DatabaseMemoryAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite database is low on memory
+            Namespace: AWS/RDS
+            MetricName: FreeableMemory
+            Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: !Ref Database
+            Statistic: Average
+            Period: 300
+            EvaluationPeriods: 2
+            Threshold: 104857600
+            ComparisonOperator: LessThanThreshold
+
+    # Alarm when the database's average CPU stays above 80% for 10 minutes
+    DatabaseCPUAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite database CPU is high
+            Namespace: AWS/RDS
+            MetricName: CPUUtilization
+            Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: !Ref Database
+            Statistic: Average
+            Period: 300
+            EvaluationPeriods: 2
+            Threshold: 80
+            ComparisonOperator: GreaterThanThreshold
+
+    # Alarm when more than 50 connections are open for 10 minutes. A db.t3.micro allows
+    # about 60 and the app normally uses 5, so this usually means connections are leaking.
+    DatabaseConnectionsAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite database has too many open connections
+            Namespace: AWS/RDS
+            MetricName: DatabaseConnections
+            Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: !Ref Database
+            Statistic: Maximum
+            Period: 300
+            EvaluationPeriods: 2
+            Threshold: 50
             ComparisonOperator: GreaterThanThreshold
 
 Outputs:
