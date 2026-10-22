@@ -68,8 +68,8 @@ function App() {
     }
 
     // errors are left to bubble up so the modal can show them
-    async function handleNewPost({ title, content }) {
-        const post = await createPost({ title, content });
+    async function handleNewPost({ title, content, image }) {
+        const post = await createPost({ title, content, image });
         setPosts((prev) => [post, ...prev]);
         setComposeOpen(false);
         setOpenPostId(null);

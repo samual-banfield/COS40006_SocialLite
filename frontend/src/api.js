@@ -9,14 +9,16 @@ export function setToken(newToken) {
 }
 
 async function request(path, { method = "GET", body } = {}) {
+    // FormData is sent as is, the browser sets its multipart content type
+    const isForm = body instanceof FormData;
     const headers = {};
-    if (body) headers["Content-Type"] = "application/json";
+    if (body && !isForm) headers["Content-Type"] = "application/json";
     if (token) headers.Authorization = `Bearer ${token}`;
 
     const res = await fetch(path, {
         method,
         headers,
-        body: body ? JSON.stringify(body) : undefined,
+        body: body && !isForm ? JSON.stringify(body) : body,
     });
     if (res.status === 204) return null;
 
@@ -45,8 +47,16 @@ export function getPost(id) {
     return request(`/api/post/${id}`);
 }
 
-export function createPost({ title, content }) {
-    return request("/api/post", { method: "POST", body: { title, content } });
+// image is an optional File, which means the post has to be sent as multipart form data
+export function createPost({ title, content, image }) {
+    if (!image) {
+        return request("/api/post", { method: "POST", body: { title, content } });
+    }
+    const form = new FormData();
+    form.append("title", title);
+    form.append("content", content);
+    form.append("image", image);
+    return request("/api/post", { method: "POST", body: form });
 }
 
 export function likePost(id) {

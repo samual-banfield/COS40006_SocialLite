@@ -47,3 +47,26 @@
 .compose-submit {
     padding: 0 1.625rem;
 }
+
+/* attached image, shown by name rather than a preview to keep the modal short */
+.compose-image {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    align-self: flex-start;
+    max-width: 100%;
+    padding: 0.25rem 0.25rem 0.25rem 0.875rem;
+    border-radius: 999px;
+    background: var(--accent-soft);
+}
+
+.compose-image-name {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 0.875rem;
+}
+
+.compose-image-add {
+    align-self: flex-start;
+}
