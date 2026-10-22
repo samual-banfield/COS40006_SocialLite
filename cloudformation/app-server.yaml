@@ -9,17 +9,26 @@ Parameters:
         Type: AWS::EC2::VPC::Id
         Description: VPC to run the server and database in
 
-    # Must be a public subnet inside the VPC above
-    SubnetId:
-        Type: AWS::EC2::Subnet::Id
-        Description: Public subnet for the server
-
-    # RDS needs subnets in at least two availability zones, even for a single database
-    DbSubnetIds:
+    # Public subnets in at least two availability zones. The load balancer and RDS both need two,
+    # and the servers are spread across them, so losing one zone doesn't take the app down.
+    SubnetIds:
         Type: List<AWS::EC2::Subnet::Id>
-        Description: Subnets the database can run in, in at least two availability zones
+        Description: Public subnets for the load balancer, servers and database, in at least two availability zones
 
-    # A new image replaces the server, so production keeps the one it was created with
+    # Staging uses 1 and 1, as every new staging server resets the database
+    MinServers:
+        Type: Number
+        Default: 1
+        MinValue: 1
+        Description: Servers to always keep running
+
+    MaxServers:
+        Type: Number
+        Default: 1
+        MinValue: 1
+        Description: Most servers to scale up to when CPU is high
+
+    # A new image replaces the servers, so production keeps the one it was created with
     AmiId:
         Type: AWS::EC2::Image::Id
         Description: Amazon Linux 2023 image for the server
@@ -73,7 +82,19 @@ Resources:
     # Rule changes are applied in place.
     # Recreated if: the VPC or a group description changes.
 
-    # Server firewall: only allow web traffic in
+    # Load balancer firewall: allow web traffic in from anywhere
+    LoadBalancerSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allow HTTP traffic to the Social Lite load balancer
+            VpcId: !Ref VpcId
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 80
+                  ToPort: 80
+                  CidrIp: 0.0.0.0/0
+
+    # Server firewall: only the load balancer can reach the servers
     SecurityGroup:
         Type: AWS::EC2::SecurityGroup
         Properties:
@@ -83,9 +104,9 @@ Resources:
                 - IpProtocol: tcp
                   FromPort: 80
                   ToPort: 80
-                  CidrIp: 0.0.0.0/0
+                  SourceSecurityGroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
 
-    # Database firewall: only the server can reach the database
+    # Database firewall: only the servers can reach the database
     DatabaseSecurityGroup:
         Type: AWS::EC2::SecurityGroup
         Properties:
@@ -101,7 +122,8 @@ Resources:
     # Policy changes are applied in place.
     # Recreated if: the role or profile is given a fixed name or path.
 
-    # Lets the server pull images from ECR and use its own image bucket, and nothing else
+    # Lets the server pull images from ECR, use its own image bucket and report its health
+    # check to CloudWatch, and nothing else
     InstanceRole:
         Type: AWS::IAM::Role
         Properties:
@@ -130,6 +152,17 @@ Resources:
                           - Effect: Allow
                             Action: s3:ListBucket
                             Resource: !Sub arn:${AWS::Partition}:s3:::${ImageBucket}
+                - PolicyName: ReportHealth
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          # PutMetricData can't be limited to a resource, only to a namespace
+                          - Effect: Allow
+                            Action: cloudwatch:PutMetricData
+                            Resource: "*"
+                            Condition:
+                                StringEquals:
+                                    cloudwatch:namespace: SocialLite
 
     InstanceProfile:
         Type: AWS::IAM::InstanceProfile
@@ -146,7 +179,7 @@ Resources:
         Type: AWS::RDS::DBSubnetGroup
         Properties:
             DBSubnetGroupDescription: Subnets the Social Lite database can run in
-            SubnetIds: !Ref DbSubnetIds
+            SubnetIds: !Ref SubnetIds
 
     # A snapshot is kept if the database is deleted or has to be replaced
     Database:
@@ -183,17 +216,30 @@ Resources:
                 - Key: Name
                   Value: !Ref AWS::StackName
 
-    # ==== 4. Server ====
-    # Tag changes are applied in place. An instance type change stops and starts the server.
-    # Recreated if: the start up script, AMI or subnet changes. The new server
-    # starts before the old one is deleted, and gets a new public IP.
+    # ==== 4. Servers ====
+    # Server counts and scaling changes are applied in place.
+    # Recreated if: the start up script, AMI, instance type or subnets change. A new group of
+    # servers starts, and the old one is only deleted once every new server's app is healthy.
 
-    # Holds the server's start up script. Changing the script makes a new version,
-    # and a new version replaces the server, so the new script always runs.
+    # How each server is set up. Changing anything makes a new version, and a new
+    # version replaces the servers, so the new script always runs.
     ServerLaunchTemplate:
         Type: AWS::EC2::LaunchTemplate
         Properties:
             LaunchTemplateData:
+                ImageId: !Ref AmiId
+                # The database is on RDS and images are in S3, so only the app runs here. During a
+                # deploy the migrations run next to the old app, and the swap added at start up covers that.
+                InstanceType: t3.micro
+                IamInstanceProfile:
+                    Arn: !GetAtt InstanceProfile.Arn
+                # A public IP lets the server reach ECR, S3 and CloudWatch without a NAT gateway.
+                # The firewall still only lets the load balancer in.
+                NetworkInterfaces:
+                    - AssociatePublicIpAddress: true
+                      DeviceIndex: 0
+                      Groups:
+                          - !Ref SecurityGroup
                 # The app reaches the server's IAM role through the instance metadata service.
                 # It runs in a Docker container, one network hop further away, so allow 2 hops.
                 MetadataOptions:
@@ -205,9 +251,20 @@ Resources:
                         #!/bin/bash
                         # Stop on any error. No -x, so passwords aren't printed to the logs.
                         set -eu
+                        # Tell CloudFormation this server failed, so a stack update rolls back straight away
+                        trap '/opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource ServerGroup --region ${AWS::Region} || true' ERR
 
-                        # 1. Install Docker and the AWS CLI
-                        dnf install -y docker awscli-2
+                        # 1. Add 1 GB of swap, so a deploy that briefly needs more than the
+                        #    t3.micro's 1 GB of memory slows down instead of the app being killed.
+                        #    It is listed in fstab so it is kept after a restart.
+                        dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
+                        chmod 600 /swapfile
+                        mkswap /swapfile > /dev/null
+                        swapon /swapfile
+                        echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+
+                        #    Then install Docker, the AWS CLI and cfn-signal
+                        dnf install -y docker awscli-2 aws-cfn-bootstrap
                         systemctl enable --now docker
 
                         # 2. Save the app's settings, used every time the app container starts
@@ -238,7 +295,8 @@ Resources:
                         if [ "$NEW" = "$CURRENT" ]; then exit 0; fi
                         echo "Updating the app to $NEW"
 
-                        # Update the database. If this fails, the old app keeps running.
+                        # Update the database. If this fails, the old app keeps running. Several production
+                        # servers can run migrate deploy at once, as Prisma locks the database while it runs.
                         if [ "${SeedDatabase}" = "true" ]; then
                           # Staging: delete everything, rebuild the tables, and add test data
                           docker run --rm --env-file /etc/sociallite.env $IMAGE \
@@ -275,32 +333,159 @@ Resources:
                         EOF
                         systemctl enable --now update-app
 
-    Server:
-        Type: AWS::EC2::Instance
+                        # 5. Write the health check script. It sends CloudWatch:
+                        #      HealthCheck        1 if /api/health (which also checks the database) is ok, 0 if not
+                        #      MemoryUsedPercent  memory in use, not counting what Linux can free for cache
+                        #      DiskUsedPercent    space used on the server's disk
+                        #    Response times come from the load balancer, which sees every request.
+                        cat > /usr/local/bin/report-health <<'EOF'
+                        #!/bin/bash
+                        if curl --fail --silent --max-time 10 http://localhost/api/health > /dev/null; then
+                          HEALTHY=1
+                        else
+                          HEALTHY=0
+                        fi
+
+                        # MemAvailable comes after MemFree, so it is used when the kernel reports it
+                        MEMORY_USED=$(awk '/^MemTotal:/ { total = $2 } /^Mem(Free|Available):/ { free = $2 }
+                          END { printf "%.1f", 100 * (1 - free / total) }' /proc/meminfo)
+                        DISK_USED=$(df --output=pcent / | tail -1 | tr -dc '0-9')
+
+                        STACK="Dimensions=[{Name=Stack,Value=${AWS::StackName}}]"
+                        aws cloudwatch put-metric-data --region ${AWS::Region} --namespace SocialLite --metric-data \
+                          "MetricName=HealthCheck,Value=$HEALTHY,$STACK" \
+                          "MetricName=MemoryUsedPercent,Unit=Percent,Value=$MEMORY_USED,$STACK" \
+                          "MetricName=DiskUsedPercent,Unit=Percent,Value=$DISK_USED,$STACK"
+                        EOF
+                        chmod +x /usr/local/bin/report-health
+
+                        # 6. Run the health check every minute
+                        cat > /etc/systemd/system/report-health.service <<'EOF'
+                        [Unit]
+                        Description=Report Social Lite's health to CloudWatch
+                        After=network-online.target
+
+                        [Service]
+                        ExecStart=/bin/bash -c 'while true; do /usr/local/bin/report-health || echo "Could not send the health check to CloudWatch."; sleep 60; done'
+                        Restart=always
+
+                        [Install]
+                        WantedBy=multi-user.target
+                        EOF
+                        systemctl enable --now report-health
+
+                        # 7. Tell CloudFormation this server is ready once its app is healthy, waiting
+                        #    up to 10 minutes. The first production stack is created before any image is
+                        #    tagged production, so with no image yet there is nothing to wait for.
+                        if aws ecr describe-images --region ${AWS::Region} --repository-name ${ImageRepository} \
+                             --image-ids imageTag=${ImageTag} > /dev/null 2>&1; then
+                          for attempt in $(seq 1 60); do
+                            if curl --fail --silent --max-time 5 http://localhost/api/health > /dev/null; then break; fi
+                            sleep 10
+                          done
+                          curl --fail --silent --max-time 5 http://localhost/api/health > /dev/null
+                        else
+                          echo "No image is tagged ${ImageTag} yet. The app will start once one is."
+                        fi
+                        # Only a stack create or update waits for this, so a server added later ignores it failing
+                        /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource ServerGroup --region ${AWS::Region} || true
+
+    # Keeps between MinServers and MaxServers servers running across the subnets. A server whose
+    # /api/health fails the load balancer's check is replaced, as is one AWS finds a hardware problem with.
+    ServerGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        # A stack create or update waits for every new server to report a healthy app
+        CreationPolicy:
+            ResourceSignal:
+                Count: !Ref MinServers
+                Timeout: PT15M
+        # A new launch template version builds a new group of servers next to the old one,
+        # and only deletes the old one once the new one is healthy
+        UpdatePolicy:
+            AutoScalingReplacingUpdate:
+                WillReplace: true
         Properties:
-            ImageId: !Ref AmiId
-            # Small rather than micro, so there is enough memory to run migrations next to the app
-            InstanceType: t3.small
-            IamInstanceProfile: !Ref InstanceProfile
             LaunchTemplate:
                 LaunchTemplateId: !Ref ServerLaunchTemplate
                 Version: !GetAtt ServerLaunchTemplate.LatestVersionNumber
-            NetworkInterfaces:
-                - AssociatePublicIpAddress: true
-                  DeviceIndex: "0"
-                  GroupSet:
-                      - !Ref SecurityGroup
-                  SubnetId: !Ref SubnetId
-            # Shown in the EC2 console's Name column: social-lite-staging or social-lite-production.
-            # Changing tags doesn't replace the server.
+            MinSize: !Ref MinServers
+            MaxSize: !Ref MaxServers
+            VPCZoneIdentifier: !Ref SubnetIds
+            TargetGroupARNs:
+                - !Ref TargetGroup
+            HealthCheckType: ELB
+            # A new server needs time to install Docker, download the image and update the database
+            HealthCheckGracePeriod: 900
+            # Shown in the EC2 console's Name column: social-lite-staging or social-lite-production
+            Tags:
+                - Key: Name
+                  Value: !Ref AWS::StackName
+                  PropagateAtLaunch: true
+
+    # Adds servers when average CPU stays above 60%, and removes them when it drops, between
+    # MinServers and MaxServers. Staging's minimum and maximum are both 1, so it never scales.
+    # This makes its own TargetTracking- alarms, which are meant to sit in ALARM while CPU is low.
+    ScalingPolicy:
+        Type: AWS::AutoScaling::ScalingPolicy
+        Properties:
+            AutoScalingGroupName: !Ref ServerGroup
+            PolicyType: TargetTrackingScaling
+            TargetTrackingConfiguration:
+                PredefinedMetricSpecification:
+                    PredefinedMetricType: ASGAverageCPUUtilization
+                TargetValue: 60
+
+    # ==== 5. Load balancer ====
+    # All changes are applied in place.
+    # Recreated if: the subnets change, which gives the app a new web address.
+
+    # The app's fixed web address. It only sends requests to servers whose /api/health passes.
+    LoadBalancer:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            Scheme: internet-facing
+            Subnets: !Ref SubnetIds
+            SecurityGroups:
+                - !Ref LoadBalancerSecurityGroup
             Tags:
                 - Key: Name
                   Value: !Ref AWS::StackName
 
-    # ==== 5. Monitoring ====
-    # All changes are applied in place, including pointing at a recreated server.
+    # A server is taken out after failing 3 checks in a row (45 seconds), and put back after passing 2
+    TargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+            VpcId: !Ref VpcId
+            Protocol: HTTP
+            Port: 80
+            TargetType: instance
+            HealthCheckPath: /api/health
+            HealthCheckIntervalSeconds: 15
+            HealthCheckTimeoutSeconds: 5
+            HealthyThresholdCount: 2
+            UnhealthyThresholdCount: 3
+            Matcher:
+                HttpCode: "200"
+            # Requests already in progress get 30 seconds to finish when a server is removed
+            TargetGroupAttributes:
+                - Key: deregistration_delay.timeout_seconds
+                  Value: "30"
 
-    # Alarm when average CPU stays above 80% for 10 minutes (two 5 minute checks)
+    Listener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+            LoadBalancerArn: !Ref LoadBalancer
+            Port: 80
+            Protocol: HTTP
+            DefaultActions:
+                - Type: forward
+                  TargetGroupArn: !Ref TargetGroup
+
+    # ==== 6. Monitoring ====
+    # All changes are applied in place, including pointing at a recreated server group.
+
+    # Alarm when the servers' average CPU stays above 80% for 10 minutes (two 5 minute checks).
+    # Production should have added servers well before this, so it means scaling isn't keeping up.
     CPUAlarm:
         Type: AWS::CloudWatch::Alarm
         Properties:
@@ -308,19 +493,192 @@ Resources:
             Namespace: AWS/EC2
             MetricName: CPUUtilization
             Dimensions:
-                - Name: InstanceId
-                  Value: !Ref Server
+                - Name: AutoScalingGroupName
+                  Value: !Ref ServerGroup
             Statistic: Average
             Period: 300
             EvaluationPeriods: 2
             Threshold: 80
             ComparisonOperator: GreaterThanThreshold
 
+    # Alarm when fewer healthy servers than MinServers have been behind the load balancer for
+    # 3 minutes. The server group replaces unhealthy ones, so this means replacing isn't working.
+    HealthyServersAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite has fewer healthy servers than it should
+            Namespace: AWS/ApplicationELB
+            MetricName: HealthyHostCount
+            Dimensions:
+                - Name: LoadBalancer
+                  Value: !GetAtt LoadBalancer.LoadBalancerFullName
+                - Name: TargetGroup
+                  Value: !GetAtt TargetGroup.TargetGroupFullName
+            Statistic: Minimum
+            Period: 60
+            EvaluationPeriods: 3
+            Threshold: !Ref MinServers
+            ComparisonOperator: LessThanThreshold
+            TreatMissingData: breaching
+
+    # Alarm when the app or its database has been down for 3 minutes (sent by report-health
+    # on each server). Maximum means it only fires if no server is healthy, so the old servers
+    # cover for new ones while they start. No data means no server is running.
+    HealthCheckAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite is down, /api/health is failing or not being reported
+            Namespace: SocialLite
+            MetricName: HealthCheck
+            Dimensions:
+                - Name: Stack
+                  Value: !Ref AWS::StackName
+            Statistic: Maximum
+            Period: 60
+            EvaluationPeriods: 3
+            Threshold: 1
+            ComparisonOperator: LessThanThreshold
+            TreatMissingData: breaching
+
+    # Alarm when requests have averaged over 1 second for 5 minutes, timed by the load balancer
+    # from passing a request to a server until the server answers
+    ResponseTimeAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite is responding slowly
+            Namespace: AWS/ApplicationELB
+            MetricName: TargetResponseTime
+            Dimensions:
+                - Name: LoadBalancer
+                  Value: !GetAtt LoadBalancer.LoadBalancerFullName
+            Statistic: Average
+            Period: 60
+            EvaluationPeriods: 5
+            Threshold: 1
+            ComparisonOperator: GreaterThanThreshold
+
+    # Alarm when the app has returned more than 10 server errors (5xx) in 5 minutes.
+    # No requests means no data, which isn't an error.
+    ServerErrorsAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite is returning server errors
+            Namespace: AWS/ApplicationELB
+            MetricName: HTTPCode_Target_5XX_Count
+            Dimensions:
+                - Name: LoadBalancer
+                  Value: !GetAtt LoadBalancer.LoadBalancerFullName
+            Statistic: Sum
+            Period: 300
+            EvaluationPeriods: 1
+            Threshold: 10
+            ComparisonOperator: GreaterThanThreshold
+            TreatMissingData: notBreaching
+
+    # Alarm when any server has had over 90% of its memory in use for 5 minutes.
+    # A deploy can reach this for a minute or two, so a short spike doesn't count.
+    MemoryAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite server is low on memory
+            Namespace: SocialLite
+            MetricName: MemoryUsedPercent
+            Dimensions:
+                - Name: Stack
+                  Value: !Ref AWS::StackName
+            Statistic: Maximum
+            Period: 60
+            EvaluationPeriods: 5
+            Threshold: 90
+            ComparisonOperator: GreaterThanThreshold
+
+    # Alarm when any server's disk is over 85% full. Old images are removed on every update,
+    # so this usually means logs are building up.
+    DiskAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite server disk is almost full
+            Namespace: SocialLite
+            MetricName: DiskUsedPercent
+            Dimensions:
+                - Name: Stack
+                  Value: !Ref AWS::StackName
+            Statistic: Maximum
+            Period: 300
+            EvaluationPeriods: 1
+            Threshold: 85
+            ComparisonOperator: GreaterThanThreshold
+
+    # Alarm when the database has less than 2 GB (10%) of storage left. A full database stops writes.
+    DatabaseStorageAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite database is almost out of storage
+            Namespace: AWS/RDS
+            MetricName: FreeStorageSpace
+            Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: !Ref Database
+            Statistic: Minimum
+            Period: 300
+            EvaluationPeriods: 1
+            Threshold: 2147483648
+            ComparisonOperator: LessThanThreshold
+
+    # Alarm when the database has had less than 100 MB of its 1 GB memory free for 10 minutes
+    DatabaseMemoryAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite database is low on memory
+            Namespace: AWS/RDS
+            MetricName: FreeableMemory
+            Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: !Ref Database
+            Statistic: Average
+            Period: 300
+            EvaluationPeriods: 2
+            Threshold: 104857600
+            ComparisonOperator: LessThanThreshold
+
+    # Alarm when the database's average CPU stays above 80% for 10 minutes
+    DatabaseCPUAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite database CPU is high
+            Namespace: AWS/RDS
+            MetricName: CPUUtilization
+            Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: !Ref Database
+            Statistic: Average
+            Period: 300
+            EvaluationPeriods: 2
+            Threshold: 80
+            ComparisonOperator: GreaterThanThreshold
+
+    # Alarm when more than 50 connections are open for 10 minutes. A db.t3.micro allows
+    # about 60 and the app normally uses 5, so this usually means connections are leaking.
+    DatabaseConnectionsAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite database has too many open connections
+            Namespace: AWS/RDS
+            MetricName: DatabaseConnections
+            Dimensions:
+                - Name: DBInstanceIdentifier
+                  Value: !Ref Database
+            Statistic: Maximum
+            Period: 300
+            EvaluationPeriods: 2
+            Threshold: 50
+            ComparisonOperator: GreaterThanThreshold
+
 Outputs:
     AppURL:
         Description: Social Lite web address
-        Value: !Sub "http://${Server.PublicIp}"
+        Value: !Sub "http://${LoadBalancer.DNSName}"
 
     DatabaseEndpoint:
-        Description: Database address, only reachable from the server
+        Description: Database address, only reachable from the servers
         Value: !GetAtt Database.Endpoint.Address

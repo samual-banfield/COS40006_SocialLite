@@ -49,10 +49,12 @@ jobs:
             - name: Lint templates
               run: pipx run cfn-lint cloudformation/*.yaml
 
-            - name: Check the server has a CPU alarm
+            # Without this alarm, "Check no CloudWatch alarms are firing" can't tell when the app is down.
+            # Matches whole lines only, so a commented out alarm doesn't count.
+            - name: Check the server has a health check alarm
               run: |
-                  if ! grep -q 'MetricName: CPUUtilization' "$TEMPLATE"; then
-                    echo "::error file=$TEMPLATE,title=CloudWatch CPU alarm missing::$TEMPLATE has no CloudWatch alarm on CPUUtilization."
+                  if ! grep -qE '^\s*MetricName: HealthCheck\s*$' "$TEMPLATE"; then
+                    echo "::error file=$TEMPLATE,title=CloudWatch health check alarm missing::$TEMPLATE has no CloudWatch alarm on the HealthCheck metric."
                     exit 1
                   fi
 
@@ -115,13 +117,9 @@ jobs:
                     exit 1
                   fi
 
-                  # Default subnets are public, which the app needs
-                  SUBNET_ID=$(aws ec2 describe-subnets \
-                    --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true \
-                    --query "sort_by(Subnets, &AvailabilityZone)[0].SubnetId" --output text)
-
-                  # The database needs subnets in at least two availability zones
-                  DB_SUBNET_IDS=$(aws ec2 describe-subnets \
+                  # Default subnets are public, one in each availability zone. The load balancer,
+                  # servers and database all need at least two zones.
+                  SUBNET_IDS=$(aws ec2 describe-subnets \
                     --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true \
                     --query "Subnets[].SubnetId" --output text | tr '\t' ',')
 
@@ -129,10 +127,9 @@ jobs:
                     --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
                     --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
 
-                  echo "Using VPC $VPC_ID, subnet $SUBNET_ID, database subnets $DB_SUBNET_IDS and image $AMI_ID"
+                  echo "Using VPC $VPC_ID, subnets $SUBNET_IDS and image $AMI_ID"
                   echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
-                  echo "subnet_id=$SUBNET_ID" >> "$GITHUB_OUTPUT"
-                  echo "db_subnet_ids=$DB_SUBNET_IDS" >> "$GITHUB_OUTPUT"
+                  echo "subnet_ids=$SUBNET_IDS" >> "$GITHUB_OUTPUT"
                   echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
 
             # The server follows the "staging" tag. Moving it before the stack is updated
@@ -180,14 +177,15 @@ jobs:
                   echo "name=$BUCKET" >> "$GITHUB_OUTPUT"
 
             # CloudFormation only changes what no longer matches the template. Creating the
-            # stack, or replacing the database, takes about 10 extra minutes.
+            # stack, or replacing the database, takes about 10 extra minutes. Replacing the
+            # server waits until the new one's app is healthy.
+            # Staging keeps exactly 1 server, as every new staging server resets the database.
             - name: Create or update the staging stack
               env:
                   DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
                   JWT_SECRET: ${{ secrets.JWT_SECRET }}
                   VPC_ID: ${{ steps.network.outputs.vpc_id }}
-                  SUBNET_ID: ${{ steps.network.outputs.subnet_id }}
-                  DB_SUBNET_IDS: ${{ steps.network.outputs.db_subnet_ids }}
+                  SUBNET_IDS: ${{ steps.network.outputs.subnet_ids }}
                   AMI_ID: ${{ steps.network.outputs.ami_id }}
                   IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
               run: |
@@ -198,8 +196,9 @@ jobs:
                     --no-fail-on-empty-changeset \
                     --parameter-overrides \
                       VpcId="$VPC_ID" \
-                      SubnetId="$SUBNET_ID" \
-                      DbSubnetIds="$DB_SUBNET_IDS" \
+                      SubnetIds="$SUBNET_IDS" \
+                      MinServers=1 \
+                      MaxServers=1 \
                       AmiId="$AMI_ID" \
                       ImageRepository="$IMAGE_REPOSITORY" \
                       ImageTag=staging \
@@ -272,7 +271,28 @@ jobs:
                     exit 1
                   fi
 
-            # ---- 4. Mark the image as tested ----
+            # ---- 4. Check CloudWatch ----
+            # The health check alarm needs 3 minutes of reports from the new version, so wait 4.
+            # CloudFormation starts every alarm's name with the stack name. The scaling policy's own
+            # alarms start with TargetTracking- instead, so they are left out, as one of them is in
+            # ALARM whenever CPU is low.
+            - name: Check no CloudWatch alarms are firing
+              run: |
+                  set -euo pipefail
+                  echo "Waiting 4 minutes for the alarms to see the new version..."
+                  sleep 240
+
+                  FIRING=$(aws cloudwatch describe-alarms \
+                    --alarm-name-prefix "$STACK_NAME-" --state-value ALARM \
+                    --query "MetricAlarms[].AlarmName" --output text)
+
+                  if [ -n "$FIRING" ]; then
+                    echo "::error title=CloudWatch alarms firing::These staging alarms are firing: $FIRING. Open them in the CloudWatch console to see why."
+                    exit 1
+                  fi
+                  echo "No CloudWatch alarms are firing."
+
+            # ---- 5. Mark the image as tested ----
             # Adds a second tag to the same image. Nothing is rebuilt or copied.
             - name: Tag the image as tested
               env:
