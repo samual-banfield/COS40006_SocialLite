@@ -1,0 +1,139 @@
+# Requires: AWS_ACCESS_KEY_ID & AWS_SECRET_ACCESS_KEY in GitHub secrets
+name: Deploy production
+
+on:
+    push:
+        branches: [Production]
+    workflow_dispatch:
+        inputs:
+            ref:
+                description: Branch or commit to deploy
+                type: string
+                default: Production
+
+permissions:
+    contents: read
+
+# Never run two releases at once
+concurrency:
+    group: deploy-production
+    cancel-in-progress: false
+
+env:
+    AWS_REGION: ap-southeast-2
+    STACK_NAME: social-lite-production
+    IMAGE_REPOSITORY: social-lite-app
+    TEMPLATE: cloudformation/app-server.yaml
+
+jobs:
+    deploy:
+        name: Release to production
+        runs-on: ubuntu-latest
+        environment:
+            name: production
+            url: ${{ steps.stack.outputs.app_url }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.ref || github.sha }}
+
+            - name: Log in to AWS
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ env.AWS_REGION }}
+
+            - name: Log in to ECR
+              id: ecr
+              uses: aws-actions/amazon-ecr-login@v2
+
+            - name: Stop if production hasn't been created
+              run: |
+                  if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" > /dev/null 2>&1; then
+                    echo "::error::$STACK_NAME doesn't exist. Run Create production (run once) first."
+                    exit 1
+                  fi
+
+            # ---- 1. Find the tested image ----
+            - name: Find the image staging tested
+              id: image
+              run: |
+                  set -euo pipefail
+                  VERSION=$(git rev-parse --short=12 "HEAD^{tree}")
+
+                  if ! aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="tested-$VERSION" > /dev/null 2>&1; then
+                    echo "::error::No image tagged tested-$VERSION. This code hasn't passed staging yet."
+                    exit 1
+                  fi
+
+                  echo "Releasing version $VERSION"
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+            # ---- 2. Update the infrastructure ----
+            # Parameters aren't passed, so CloudFormation keeps the values the stack was
+            # created with. Only changes to the template itself are applied.
+            - name: Apply template changes
+              run: |
+                  aws cloudformation deploy \
+                    --stack-name "$STACK_NAME" \
+                    --template-file "$TEMPLATE" \
+                    --capabilities CAPABILITY_IAM \
+                    --no-fail-on-empty-changeset
+
+            - name: Show why the stack failed
+              if: failure()
+              run: |
+                  aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
+                    --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
+                    --output table || true
+
+            # ---- 3. Release the image ----
+            # Adds a tag to the tested image.
+            - name: Tag the tested image as production
+              env:
+                  REGISTRY: ${{ steps.ecr.outputs.registry }}
+                  VERSION: ${{ steps.image.outputs.version }}
+              run: |
+                  docker buildx imagetools create \
+                    --tag "$REGISTRY/$IMAGE_REPOSITORY:production" \
+                    "$REGISTRY/$IMAGE_REPOSITORY:tested-$VERSION"
+
+            # ---- 4. Check the running app ----
+            - name: Get the app URL
+              id: stack
+              run: |
+                  set -euo pipefail
+                  APP_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                    --query "Stacks[0].Outputs[?OutputKey=='AppURL'].OutputValue" --output text)
+
+                  echo "Production is at $APP_URL"
+                  echo "app_url=$APP_URL" >> "$GITHUB_OUTPUT"
+
+            # The server checks for the new image every minute, so wait up to 10 minutes
+            - name: Wait for the new version to go live
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
+                  VERSION: ${{ steps.image.outputs.version }}
+              run: |
+                  for attempt in $(seq 1 40); do
+                    if curl --fail --silent "$APP_URL/api/health" | grep -q "\"version\":\"$VERSION\""; then
+                      echo "Health check passed. Running version $VERSION."
+                      exit 0
+                    fi
+
+                    echo "Attempt $attempt: not live yet. Retrying in 15 seconds..."
+                    sleep 15
+                  done
+
+                  echo "::error::Production is not running version $VERSION."
+                  exit 1
+
+            - name: Check the home page loads
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
+              run: |
+                  # Save the page first. Piping curl into grep -q can fail when grep exits early.
+                  PAGE=$(curl --fail --silent --show-error "$APP_URL/")
+                  echo "$PAGE" | grep -q '<title>SocialLite</title>'
+                  echo "Home page check passed."

@@ -1,0 +1,162 @@
+# Moves code through the branches:
+#   feature branch -> Development  PR, approved by the team lead
+#   Development    -> Staging      merged automatically once the Jest tests pass
+#   Staging        -> Production   PR opened once staging deploys and passes its tests,
+#                                  approved by the team lead
+#
+# This is all one workflow because a merge made by a workflow doesn't start
+# other workflows, so a separate "on push to Staging" workflow would never run.
+
+name: Promote branches
+
+on:
+    push:
+        branches: [Development, Staging]
+    workflow_dispatch: # run by hand from the Actions tab
+
+permissions:
+    contents: write
+    pull-requests: write
+    statuses: write
+
+# Only one promotion at a time
+concurrency:
+    group: promote-branches
+    cancel-in-progress: false
+
+env:
+    GH_TOKEN: ${{ github.token }}
+    GH_REPO: ${{ github.repository }}
+
+jobs:
+    unit-tests:
+        name: Jest tests
+        if: github.ref_name == 'Development'
+        runs-on: ubuntu-latest
+        # The tests use a real MySQL database filled with test data
+        services:
+            mysql:
+                image: mysql:8.4
+                env:
+                    MYSQL_ROOT_PASSWORD: password
+                    MYSQL_DATABASE: sociallite
+                ports:
+                    - 3306:3306
+                options: >-
+                    --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -ppassword --silent"
+                    --health-interval 5s
+                    --health-timeout 5s
+                    --health-retries 20
+        env:
+            DATABASE_URL: mysql://root:password@127.0.0.1:3306/sociallite?allowPublicKeyRetrieval=true
+            JWT_SECRET: ci-test-secret
+        defaults:
+            run:
+                working-directory: backend
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: "24"
+                  cache: npm
+                  cache-dependency-path: backend/package-lock.json
+
+            - run: npm ci
+            - run: npx prisma migrate deploy
+            - run: npx prisma db seed
+            - run: npm test
+
+    promote-to-staging:
+        name: Development → Staging (auto-merge)
+        needs: unit-tests
+        if: github.ref_name == 'Development'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Open and merge PR into Staging
+              run: |
+                  set -euo pipefail
+
+                  ahead=$(gh api "repos/$GH_REPO/compare/Staging...Development" --jq '.ahead_by')
+                  if [ "$ahead" = "0" ]; then
+                    echo "Staging already has everything in Development. Nothing to promote."
+                    exit 0
+                  fi
+
+                  # Use the open promotion PR if there is one, otherwise open one
+                  pr=$(gh pr list --base Staging --head Development --state open --json number --jq '.[0].number // empty')
+                  if [ -z "$pr" ]; then
+                    pr_url=$(gh pr create --base Staging --head Development \
+                      --title "Promote Development → Staging" \
+                      --body "Automated promotion of Development @ ${GITHUB_SHA::7}. Auto-merged by the Promote branches workflow.")
+                    pr="${pr_url##*/}"
+                    echo "Opened PR #$pr"
+                  fi
+
+                  # PRs opened by a workflow don't start the Branch source check workflow,
+                  # so post its required "Staging source check" status here instead
+                  head_sha=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')
+                  gh api "repos/$GH_REPO/statuses/$head_sha" \
+                    -f state=success -f context="Staging source check" \
+                    -f description="Opened by the promotion workflow from Development" > /dev/null
+
+                  # GitHub takes a few seconds to check the PR can merge, so retry.
+                  # A merge commit (not squash) keeps the branch histories in line.
+                  for attempt in 1 2 3 4 5 6; do
+                    if gh pr merge "$pr" --merge --subject "Promote Development to Staging (${GITHUB_SHA::7})"; then
+                      echo "Merged PR #$pr into Staging."
+                      exit 0
+                    fi
+                    echo "PR #$pr not mergeable yet (attempt $attempt). Retrying in 10s..."
+                    sleep 10
+                  done
+
+                  echo "::error::Could not merge PR #$pr into Staging. Check the PR for conflicts or ruleset requirements."
+                  exit 1
+
+    # Called from here because the merge above can't start another workflow
+    deploy-staging:
+        name: Deploy and test staging
+        needs: promote-to-staging
+        # Runs after a promotion, or when Staging is pushed to directly
+        if: always() && (needs.promote-to-staging.result == 'success' || github.ref_name == 'Staging')
+        permissions:
+            contents: read
+        uses: ./.github/workflows/deploy-staging.yml
+        with:
+            ref: Staging
+
+    open-production-pr:
+        name: Staging → Production (PR for manual approval)
+        needs: deploy-staging
+        # Only offer a release once staging has deployed and passed its tests
+        if: always() && needs.deploy-staging.result == 'success'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Open PR into Production
+              run: |
+                  set -euo pipefail
+
+                  ahead=$(gh api "repos/$GH_REPO/compare/Production...Staging" --jq '.ahead_by')
+                  if [ "$ahead" = "0" ]; then
+                    echo "Production already has everything in Staging. Nothing to release."
+                    exit 0
+                  fi
+
+                  pr=$(gh pr list --base Production --head Staging --state open --json number --jq '.[0].number // empty')
+                  if [ -z "$pr" ]; then
+                    pr_url=$(gh pr create --base Production --head Staging \
+                      --title "Release: Staging → Production" \
+                      --body "Automated release PR from Staging. Needs team lead approval. Merge with **Create a merge commit** (not squash) so the branches stay in sync.")
+                    pr="${pr_url##*/}"
+                    echo "Opened release PR #$pr"
+                  else
+                    echo "Release PR #$pr already open; it now includes the latest Staging commits."
+                  fi
+
+                  # Same as above: post the required status ourselves. Done every run
+                  # because new Staging commits change the PR's latest commit.
+                  head_sha=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')
+                  gh api "repos/$GH_REPO/statuses/$head_sha" \
+                    -f state=success -f context="Production source check" \
+                    -f description="Opened by the promotion workflow from Staging" > /dev/null
