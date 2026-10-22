@@ -629,7 +629,8 @@ Resources:
             Threshold: 2147483648
             ComparisonOperator: LessThanThreshold
 
-    # Alarm when the database has had less than 100 MB of its 1 GB memory free for 10 minutes
+    # Alarm when the database has had less than 25 MB of memory free for 10 minutes. MySQL keeps
+    # about 3/4 of the 1 GB for its cache, so 50-60 MB free is normal on a db.t3.micro.
     DatabaseMemoryAlarm:
         Type: AWS::CloudWatch::Alarm
         Properties:
@@ -642,7 +643,7 @@ Resources:
             Statistic: Average
             Period: 300
             EvaluationPeriods: 2
-            Threshold: 104857600
+            Threshold: 26214400
             ComparisonOperator: LessThanThreshold
 
     # Alarm when the database's average CPU stays above 80% for 10 minutes
