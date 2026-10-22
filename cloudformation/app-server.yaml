@@ -1,29 +1,26 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: EC2 server that runs Social Lite and MySQL in Docker
+# staging     ImageTag=staging     SeedDatabase=true
+# production  ImageTag=production  SeedDatabase=false
 
-# Used by staging and production, with different parameters:
-#   staging     ImageTag=<code hash>   SeedDatabase=true   recreated every deploy
-#   production  ImageTag=production    SeedDatabase=false  created once and kept
-#
-# The server runs whatever image its ImageTag points to in ECR, and checks every
-# minute for a new one. Production is updated by moving the "production" tag.
-#
-# The ECR repository from ecr-repository.yaml must exist first.
+# Both stacks are kept and updated in place. On every deploy CloudFormation checks
 
 Parameters:
     # ---- Network and server ----
 
     VpcId:
         Type: AWS::EC2::VPC::Id
-        Description: VPC to run the server in
+        Description: VPC to run the server and database in
 
     # Must be a public subnet inside the VPC above
     SubnetId:
         Type: AWS::EC2::Subnet::Id
         Description: Public subnet for the server
 
-    # Looked up by the workflow when the stack is created. Kept as a fixed value so a
-    # new Amazon Linux release never makes CloudFormation replace the production server.
+    # RDS needs subnets in at least two availability zones, even for a single database
+    DbSubnetIds:
+        Type: List<AWS::EC2::Subnet::Id>
+        Description: Subnets the database can run in, in at least two availability zones
+
+    # A new image replaces the server, so production keeps the one it was created with
     AmiId:
         Type: AWS::EC2::Image::Id
         Description: Amazon Linux 2023 image for the server
@@ -46,9 +43,10 @@ Parameters:
         Type: String
         NoEcho: true
         MinLength: 8
+        MaxLength: 41
         AllowedPattern: "[A-Za-z0-9]+"
-        ConstraintDescription: Must be at least 8 letters or numbers
-        Description: MySQL root password
+        ConstraintDescription: Must be 8 to 41 letters or numbers
+        Description: Database password
 
     JwtSecret:
         Type: String
@@ -61,12 +59,18 @@ Parameters:
         Type: String
         Default: "false"
         AllowedValues: ["true", "false"]
-        Description: Fill the database with test data on first start
+        Description: Reset the database and fill it with test data for every new version
+
+Conditions:
+    # Staging's data is thrown away on every release, so it needs no backups or protection
+    KeepsData: !Equals [!Ref SeedDatabase, "false"]
 
 Resources:
-    # ---- Access ----
+    # ==== 1. Firewalls ====
+    # Rule changes are applied in place.
+    # Recreated if: the VPC or a group description changes.
 
-    # Firewall: only allow web traffic in
+    # Server firewall: only allow web traffic in
     SecurityGroup:
         Type: AWS::EC2::SecurityGroup
         Properties:
@@ -77,6 +81,22 @@ Resources:
                   FromPort: 80
                   ToPort: 80
                   CidrIp: 0.0.0.0/0
+
+    # Database firewall: only the server can reach the database
+    DatabaseSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allow MySQL traffic from the Social Lite server only
+            VpcId: !Ref VpcId
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 3306
+                  ToPort: 3306
+                  SourceSecurityGroupId: !GetAtt SecurityGroup.GroupId
+
+    # ==== 2. Permissions ====
+    # Policy changes are applied in place.
+    # Recreated if: the role or profile is given a fixed name or path.
 
     # Lets the server pull images from ECR, and nothing else
     InstanceRole:
@@ -98,15 +118,147 @@ Resources:
             Roles:
                 - !Ref InstanceRole
 
-    # ---- Server ----
+    # ==== 3. Database ====
+    # Size, storage, backups and version upgrades are applied in place (some restart the database).
+    # Recreated if: the engine, database name, username or encryption changes.
+    # A snapshot of the old database is taken before it is deleted.
+
+    DatabaseSubnetGroup:
+        Type: AWS::RDS::DBSubnetGroup
+        Properties:
+            DBSubnetGroupDescription: Subnets the Social Lite database can run in
+            SubnetIds: !Ref DbSubnetIds
+
+    # A snapshot is kept if the database is deleted or has to be replaced
+    Database:
+        Type: AWS::RDS::DBInstance
+        DeletionPolicy: Snapshot
+        UpdateReplacePolicy: Snapshot
+        # The password comes from a NoEcho parameter, as the server's start up script needs it too
+        Metadata:
+            cfn-lint:
+                config:
+                    ignore_checks:
+                        - W1011
+        Properties:
+            Engine: mysql
+            # RDS upgrades to newer 8.4 versions by itself, during its maintenance window
+            EngineVersion: "8.4.11"
+            AutoMinorVersionUpgrade: true
+            DBInstanceClass: db.t3.micro
+            AllocatedStorage: "20"
+            StorageType: gp3
+            StorageEncrypted: true
+            DBName: sociallite
+            MasterUsername: sociallite
+            MasterUserPassword: !Ref DbPassword
+            DBSubnetGroupName: !Ref DatabaseSubnetGroup
+            VPCSecurityGroups:
+                - !GetAtt DatabaseSecurityGroup.GroupId
+            PubliclyAccessible: false
+            MultiAZ: false
+            # Production keeps 7 days of backups, and can be restored to any point in them
+            BackupRetentionPeriod: !If [KeepsData, 7, 0]
+            DeletionProtection: !If [KeepsData, true, false]
+            Tags:
+                - Key: Name
+                  Value: !Ref AWS::StackName
+
+    # ==== 4. Server ====
+    # Tag changes are applied in place. An instance type change stops and starts the server.
+    # Recreated if: the start up script, AMI or subnet changes. The new server
+    # starts before the old one is deleted, and gets a new public IP.
+
+    # Holds the server's start up script. Changing the script makes a new version,
+    # and a new version replaces the server, so the new script always runs.
+    ServerLaunchTemplate:
+        Type: AWS::EC2::LaunchTemplate
+        Properties:
+            LaunchTemplateData:
+                # Runs once, when the server first boots
+                UserData:
+                    Fn::Base64: !Sub |
+                        #!/bin/bash
+                        # Stop on any error. No -x, so passwords aren't printed to the logs.
+                        set -eu
+
+                        # 1. Install Docker and the AWS CLI
+                        dnf install -y docker awscli-2
+                        systemctl enable --now docker
+
+                        # 2. Save the app's settings, used every time the app container starts
+                        #    (allowPublicKeyRetrieval lets the app log in to MySQL 8 without TLS)
+                        cat > /etc/sociallite.env <<EOF
+                        DATABASE_URL=mysql://sociallite:${DbPassword}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/sociallite?allowPublicKeyRetrieval=true
+                        JWT_SECRET=${JwtSecret}
+                        EOF
+                        chmod 600 /etc/sociallite.env
+
+                        # 3. Write the update script. It downloads the image tagged ${ImageTag}
+                        #    and, if it is new, updates the database and swaps the app.
+                        cat > /usr/local/bin/update-app <<'EOF'
+                        #!/bin/bash
+                        set -euo pipefail
+                        REGISTRY=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+                        IMAGE=$REGISTRY/${ImageRepository}:${ImageTag}
+
+                        aws ecr get-login-password --region ${AWS::Region} |
+                          docker login --username AWS --password-stdin $REGISTRY > /dev/null
+                        docker pull -q $IMAGE > /dev/null
+
+                        # Stop here if the app is already running this image
+                        NEW=$(docker image inspect --format '{{.Id}}' $IMAGE)
+                        CURRENT=$(docker inspect --format '{{.Image}}' app 2> /dev/null || echo none)
+                        if [ "$NEW" = "$CURRENT" ]; then exit 0; fi
+                        echo "Updating the app to $NEW"
+
+                        # Update the database. If this fails, the old app keeps running.
+                        if [ "${SeedDatabase}" = "true" ]; then
+                          # Staging: delete everything, rebuild the tables, and add test data
+                          docker run --rm --env-file /etc/sociallite.env $IMAGE \
+                            sh -c 'npx prisma migrate reset --force && npx prisma db seed'
+                        else
+                          # Production: apply new migrations only
+                          docker run --rm --env-file /etc/sociallite.env $IMAGE \
+                            npx prisma migrate deploy
+                        fi
+
+                        # Replace the app, with port 80 on the server going to port 3000 in the container
+                        docker rm -f app 2> /dev/null || true
+                        docker run -d --restart unless-stopped --name app -p 80:3000 \
+                          --env-file /etc/sociallite.env $IMAGE
+
+                        # Remove old images so the disk doesn't fill up
+                        docker image prune -af > /dev/null
+                        EOF
+                        chmod +x /usr/local/bin/update-app
+
+                        # 4. Start the app now, then check for a new image every minute.
+                        #    A failed update is tried again a minute later.
+                        cat > /etc/systemd/system/update-app.service <<'EOF'
+                        [Unit]
+                        Description=Keep Social Lite on the latest image
+                        After=docker.service
+
+                        [Service]
+                        ExecStart=/bin/bash -c 'while true; do /usr/local/bin/update-app || echo "Update failed. Trying again in a minute."; sleep 60; done'
+                        Restart=always
+
+                        [Install]
+                        WantedBy=multi-user.target
+                        EOF
+                        systemctl enable --now update-app
 
     Server:
         Type: AWS::EC2::Instance
         Properties:
             ImageId: !Ref AmiId
-            # Small rather than micro, so there is enough memory for the app and MySQL
+            # Small rather than micro, so there is enough memory to run migrations next to the app
             InstanceType: t3.small
             IamInstanceProfile: !Ref InstanceProfile
+            LaunchTemplate:
+                LaunchTemplateId: !Ref ServerLaunchTemplate
+                Version: !GetAtt ServerLaunchTemplate.LatestVersionNumber
             NetworkInterfaces:
                 - AssociatePublicIpAddress: true
                   DeviceIndex: "0"
@@ -119,96 +271,8 @@ Resources:
                 - Key: Name
                   Value: !Ref AWS::StackName
 
-            # Runs once, when the server first boots
-            UserData:
-                Fn::Base64: !Sub |
-                    #!/bin/bash
-                    # Stop on any error. No -x, so passwords aren't printed to the logs.
-                    set -eu
-
-                    # 1. Install Docker and the AWS CLI
-                    dnf install -y docker awscli-2
-                    systemctl enable --now docker
-
-                    # 2. Save the app's settings, used every time the app container starts
-                    #    (allowPublicKeyRetrieval lets the app log in to MySQL 8 without TLS)
-                    cat > /etc/sociallite.env <<EOF
-                    DATABASE_URL=mysql://root:${DbPassword}@mysql:3306/sociallite?allowPublicKeyRetrieval=true
-                    JWT_SECRET=${JwtSecret}
-                    EOF
-                    chmod 600 /etc/sociallite.env
-
-                    # 3. Start MySQL on a private network that only the app can reach.
-                    #    Its data is kept in the mysql-data volume on the server's disk.
-                    docker network create sociallite
-                    docker run -d --restart unless-stopped --name mysql --network sociallite \
-                      -e MYSQL_ROOT_PASSWORD='${DbPassword}' -e MYSQL_DATABASE=sociallite \
-                      -v mysql-data:/var/lib/mysql mysql:8.4
-
-                    until docker exec mysql mysqladmin ping -h 127.0.0.1 -uroot -p'${DbPassword}' --silent; do
-                      sleep 5
-                    done
-
-                    # 4. Write the update script. It downloads the image tagged ${ImageTag}
-                    #    and, if it is new, backs up the database, migrates, and swaps the app.
-                    cat > /usr/local/bin/update-app <<'EOF'
-                    #!/bin/bash
-                    set -euo pipefail
-                    REGISTRY=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
-                    IMAGE=$REGISTRY/${ImageRepository}:${ImageTag}
-
-                    aws ecr get-login-password --region ${AWS::Region} |
-                      docker login --username AWS --password-stdin $REGISTRY > /dev/null
-                    docker pull -q $IMAGE > /dev/null
-
-                    # Stop here if the app is already running this image
-                    NEW=$(docker image inspect --format '{{.Id}}' $IMAGE)
-                    CURRENT=$(docker inspect --format '{{.Image}}' app 2> /dev/null || echo none)
-                    if [ "$NEW" = "$CURRENT" ]; then exit 0; fi
-                    echo "Updating the app to $NEW"
-
-                    # Back up the database, keeping the latest 5 backups
-                    mkdir -p /var/backups/sociallite
-                    docker exec mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction sociallite' \
-                      > /var/backups/sociallite/$(date -u +%Y%m%dT%H%M%SZ).sql
-                    ls -1t /var/backups/sociallite/*.sql | tail -n +6 | xargs -r rm --
-
-                    # Apply new migrations. This never seeds. If it fails, the old app keeps running.
-                    docker run --rm --network sociallite --env-file /etc/sociallite.env $IMAGE \
-                      npx prisma migrate deploy
-
-                    # Replace the app, with port 80 on the server going to port 3000 in the container
-                    docker rm -f app 2> /dev/null || true
-                    docker run -d --restart unless-stopped --name app --network sociallite -p 80:3000 \
-                      --env-file /etc/sociallite.env $IMAGE
-
-                    # Remove old images so the disk doesn't fill up
-                    docker image prune -af > /dev/null
-                    EOF
-                    chmod +x /usr/local/bin/update-app
-
-                    # 5. Start the app, then add test data if asked to
-                    /usr/local/bin/update-app
-                    if [ "${SeedDatabase}" = "true" ]; then
-                      docker exec app npx prisma db seed
-                    fi
-
-                    # 6. Run the update script every minute, so the server follows its image tag
-                    cat > /etc/systemd/system/update-app.service <<'EOF'
-                    [Unit]
-                    Description=Keep Social Lite on the latest image
-                    After=docker.service
-
-                    [Service]
-                    ExecStart=/bin/bash -c 'while true; do sleep 60; /usr/local/bin/update-app; done'
-                    Restart=always
-
-                    [Install]
-                    WantedBy=multi-user.target
-                    EOF
-                    systemctl enable --now update-app
-
-    # ---- Monitoring ----
+    # ==== 5. Monitoring ====
+    # All changes are applied in place, including pointing at a recreated server.
 
     # Alarm when average CPU stays above 80% for 10 minutes (two 5 minute checks)
     CPUAlarm:
@@ -230,3 +294,7 @@ Outputs:
     AppURL:
         Description: Social Lite web address
         Value: !Sub "http://${Server.PublicIp}"
+
+    DatabaseEndpoint:
+        Description: Database address, only reachable from the server
+        Value: !GetAtt Database.Endpoint.Address
