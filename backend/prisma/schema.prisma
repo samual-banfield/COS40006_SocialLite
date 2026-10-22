@@ -18,11 +18,12 @@ model User {
 }
 
 model Post {
-  id       Int     @id @default(autoincrement())
-  authorId Int     @map("author_id")
-  title    String  @db.VarChar(100)
-  content  String  @db.VarChar(500)
-  image    String? @db.VarChar(2048)
+  id        Int      @id @default(autoincrement())
+  authorId  Int      @map("author_id")
+  title     String   @db.VarChar(100)
+  content   String   @db.VarChar(500)
+  image     String?  @db.VarChar(2048)
+  createdAt DateTime @default(now()) @map("created_at")
 
   author User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
   likes  Like[]

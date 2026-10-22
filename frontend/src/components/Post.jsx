@@ -1,15 +1,24 @@
 import { useState } from "react";
 import Avatar from "./Avatar.jsx";
-import { excerptOf } from "../format.js";
+import { excerptOf, timeAgo } from "../format.js";
 import "./Post.css";
 
 // author line shared by the feed card and the expanded post
-export function PostAuthor({ username, size }) {
+export function PostAuthor({ username, createdAt, size }) {
     if (!username) return null;
     return (
         <div className="post-author">
             <Avatar username={username} size={size} />
             <span className="post-author-name">{username}</span>
+            {createdAt && (
+                <time
+                    className="post-author-time"
+                    dateTime={createdAt}
+                    title={new Date(createdAt).toLocaleString()}
+                >
+                    {timeAgo(createdAt)}
+                </time>
+            )}
         </div>
     );
 }
@@ -44,7 +53,7 @@ function Post({ post, user, onOpen, onToggleLike }) {
                 onClick={onOpen}
                 aria-label={post.username ? `Open post by ${post.username}` : "Open post"}
             >
-                <PostAuthor username={post.username} />
+                <PostAuthor username={post.username} createdAt={post.createdAt} />
                 {post.title && <span className="post-title">{post.title}</span>}
                 {post.image && (
                     <img className="post-image" src={post.image} alt="" />

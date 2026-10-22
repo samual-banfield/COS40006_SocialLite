@@ -7,6 +7,7 @@ const postSelect = (userId) => ({
     title: true,
     content: true,
     image: true,
+    createdAt: true,
     author: { select: { username: true } },
     _count: { select: { likes: true } },
     likes: userId ? { where: { userId }, select: { userId: true } } : false,
