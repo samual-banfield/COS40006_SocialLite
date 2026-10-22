@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { PostAuthor } from "./Post.jsx";
+import PostMenu from "./PostMenu.jsx";
 import { paragraphsOf } from "../format.js";
 import "./PostView.css";
 
-// the full post, shown in place of the feed
-function PostView({ post, user, onBack, onToggleLike }) {
+// the full post, shown in place of the feed.
+// onEdit is passed whenever a user is logged in
+function PostView({ post, user, onBack, onToggleLike, onEdit }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
 
@@ -48,7 +50,8 @@ function PostView({ post, user, onBack, onToggleLike }) {
             </button>
 
             <article className="card post-view-article">
-                <PostAuthor username={post.username} size="lg" />
+                {onEdit && <PostMenu onEdit={onEdit} />}
+                <PostAuthor username={post.username} createdAt={post.createdAt} size="lg" />
                 {post.title && <h1 className="post-view-title">{post.title}</h1>}
                 {post.image && (
                     <img className="post-view-image" src={post.image} alt="" />

@@ -1,7 +1,7 @@
 import Post from "./Post.jsx";
 import "./Feed.css";
 
-function Feed({ posts, loading, error, onOpenPost }) {
+function Feed({ posts, user, loading, error, onOpenPost, onToggleLike, onEditPost }) {
     return (
         <section className="feed">
             <h1 className="feed-heading">Feed</h1>
@@ -13,7 +13,14 @@ function Feed({ posts, loading, error, onOpenPost }) {
             )}
 
             {posts.map((post) => (
-                <Post key={post.id} post={post} onOpen={() => onOpenPost(post.id)} />
+                <Post
+                    key={post.id}
+                    post={post}
+                    user={user}
+                    onOpen={() => onOpenPost(post.id)}
+                    onToggleLike={onToggleLike}
+                    onEdit={user ? () => onEditPost(post.id) : undefined}
+                />
             ))}
         </section>
     );

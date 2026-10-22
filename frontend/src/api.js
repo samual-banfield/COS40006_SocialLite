@@ -67,6 +67,10 @@ export function createPost({ title, content, image }) {
     return request("/api/post", { method: "POST", body: form });
 }
 
+export function updatePost(id, { title, content }) {
+    return request(`/api/post/${id}`, { method: "PATCH", body: { title, content } });
+}
+
 export function likePost(id) {
     return request(`/api/post/${id}/like`, { method: "POST" });
 }

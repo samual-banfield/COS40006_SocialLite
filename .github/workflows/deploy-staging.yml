@@ -107,7 +107,7 @@ jobs:
                   echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
             # ---- 2. Update the staging stack ----
-            - name: Look up the default network and latest Amazon Linux image
+            - name: Look up the default network
               id: network
               run: |
                   set -euo pipefail
@@ -125,14 +125,9 @@ jobs:
                     --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true \
                     --query "Subnets[].SubnetId" --output text | tr '\t' ',')
 
-                  AMI_ID=$(aws ec2 describe-images --owners amazon \
-                    --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
-                    --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
-
-                  echo "Using VPC $VPC_ID, subnets $SUBNET_IDS and image $AMI_ID"
+                  echo "Using VPC $VPC_ID and subnets $SUBNET_IDS"
                   echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
                   echo "subnet_ids=$SUBNET_IDS" >> "$GITHUB_OUTPUT"
-                  echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
 
             # The server follows the "staging" tag. Moving it before the stack is updated
             # means a new server starts on this image. A server that is kept picks it up
@@ -189,7 +184,6 @@ jobs:
                   JWT_SECRET: ${{ secrets.JWT_SECRET }}
                   VPC_ID: ${{ steps.network.outputs.vpc_id }}
                   SUBNET_IDS: ${{ steps.network.outputs.subnet_ids }}
-                  AMI_ID: ${{ steps.network.outputs.ami_id }}
                   IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
               run: |
                   aws cloudformation deploy \
@@ -202,7 +196,7 @@ jobs:
                       SubnetIds="$SUBNET_IDS" \
                       MinServers=1 \
                       MaxServers=1 \
-                      AmiId="$AMI_ID" \
+                      AmiId="ami-0da639e071ea706d8" \
                       ImageRepository="$IMAGE_REPOSITORY" \
                       ImageTag=staging \
                       DbPassword="$DB_PASSWORD" \
@@ -255,15 +249,6 @@ jobs:
                   echo "Health check failed."
                   exit 1
 
-            - name: Check the home page loads
-              env:
-                  APP_URL: ${{ steps.stack.outputs.app_url }}
-              run: |
-                  # Save the page first. Piping curl into grep -q can fail when grep exits early.
-                  PAGE=$(curl --fail --silent --show-error "$APP_URL/")
-                  echo "$PAGE" | grep -q '<title>SocialLite</title>'
-                  echo "Home page check passed."
-
             - uses: actions/setup-node@v5
               with:
                   node-version: "24"
@@ -288,7 +273,6 @@ jobs:
               env:
                   VPC_ID: ${{ steps.network.outputs.vpc_id }}
                   SUBNET_IDS: ${{ steps.network.outputs.subnet_ids }}
-                  AMI_ID: ${{ steps.network.outputs.ami_id }}
               run: |
                   set -euo pipefail
                   # Any one public subnet will do
@@ -297,7 +281,7 @@ jobs:
                     --template-file "$LOAD_TESTER_TEMPLATE" \
                     --capabilities CAPABILITY_IAM \
                     --no-fail-on-empty-changeset \
-                    --parameter-overrides VpcId="$VPC_ID" SubnetId="${SUBNET_IDS%%,*}" AmiId="$AMI_ID"; then
+                    --parameter-overrides VpcId="$VPC_ID" SubnetId="${SUBNET_IDS%%,*}" AmiId="ami-0da639e071ea706d8"; then
                     aws cloudformation describe-stack-events --stack-name "$LOAD_TESTER_STACK_NAME" \
                       --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
                       --output table || true

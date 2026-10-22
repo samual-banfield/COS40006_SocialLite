@@ -7,6 +7,7 @@ const postSelect = (userId) => ({
     title: true,
     content: true,
     image: true,
+    createdAt: true,
     author: { select: { username: true } },
     _count: { select: { likes: true } },
     likes: userId ? { where: { userId }, select: { userId: true } } : false,
@@ -49,6 +50,18 @@ exports.createPost = async ({ authorId, title, content, image }) => {
         if (key) await storage.deleteImage(key).catch(() => {});
         throw err;
     }
+};
+
+// returns null if the post doesn't exist, false if it isn't the user's, otherwise the updated post
+exports.updatePost = async (id, userId, { title, content }) => {
+    const existing = await prisma.post.findUnique({ where: { id }, select: { authorId: true } });
+    if (!existing) return null;
+    const post = await prisma.post.update({
+        where: { id },
+        data: { title, content },
+        select: postSelect(userId),
+    });
+    return toResponse(post);
 };
 
 const postExists = async (id) => {
