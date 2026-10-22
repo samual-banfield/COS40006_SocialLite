@@ -11,7 +11,7 @@ test("Social Lite home page loads", async ({ request }) => {
 
 
 test("Login dialog opens when clicking Log in", async ({ page }) => {
-    await page.goto("http://localhost:5173");
+    await page.goto(APP_URL);
 
     await page.getByRole("button", { name: "Log in" }).click();
 
@@ -25,7 +25,7 @@ test("Login dialog opens when clicking Log in", async ({ page }) => {
 
 
 test("Login shows an error when fields are empty", async ({ page }) => {
-    await page.goto("http://localhost:5173");
+    await page.goto(APP_URL);
 
     await page.getByRole("button", { name: "Log in" }).click();
 
@@ -39,7 +39,7 @@ test("Login shows an error when fields are empty", async ({ page }) => {
 
 
 test("User can close the login dialog", async ({ page }) => {
-    await page.goto("http://localhost:5173");
+    await page.goto(APP_URL);
 
     await page.getByRole("button", { name: "Log in" }).click();
 
@@ -54,7 +54,7 @@ test("User can close the login dialog", async ({ page }) => {
 
 
 test("Social Lite feed loads without errors", async ({ page }) => {
-    await page.goto("http://localhost:5173");
+    await page.goto(APP_URL);
 
     await expect(
         page.getByRole("button", { name: "Log in" })
@@ -72,7 +72,7 @@ test("Social Lite feed loads without errors", async ({ page }) => {
 
 test("Social Lite feed API responds successfully", async ({ request }) => {
     const response = await request.get(
-        "http://localhost:5173/api/feed"
+        `${APP_URL}/api/feed`
     );
 
     expect(response.status()).toBe(200);
@@ -88,7 +88,7 @@ test("User can register and log in", async ({ request, page }) => {
 
     // Register a new test account
     const signupResponse = await request.post(
-        "http://localhost:5173/api/auth/signup",
+        `${APP_URL}/api/auth/signup`,
         {
             data: { username, password },
         }
@@ -97,7 +97,7 @@ test("User can register and log in", async ({ request, page }) => {
     expect(signupResponse.status()).toBe(201);
 
     // Open Social Lite
-    await page.goto("http://localhost:5173");
+    await page.goto(APP_URL);
 
     // Open the login dialog
     await page.getByRole("button", { name: "Log in" }).click();
@@ -124,7 +124,7 @@ test("User can register, log in and create a post", async ({ request, page }) =>
 
     // Step 1: Register a new test account
     const signupResponse = await request.post(
-        "http://localhost:5173/api/auth/signup",
+        `${APP_URL}/api/auth/signup`,
         {
             data: { username, password },
         }
@@ -133,7 +133,7 @@ test("User can register, log in and create a post", async ({ request, page }) =>
     expect(signupResponse.status()).toBe(201);
 
     // Step 2: Open Social Lite
-    await page.goto("http://localhost:5173");
+    await page.goto(APP_URL);
 
     // Step 3: Log in through the browser
     await page.getByRole("button", { name: "Log in" }).click();
@@ -184,7 +184,7 @@ test("User can create, like and unlike a post", async ({ page, request }) => {
 
     // Step 1: Register a new user through the backend.
     const signup = await request.post(
-        "http://localhost:3000/api/auth/signup",
+        `${APP_URL}/api/auth/signup`,
         {
             data: { username, password },
         }
@@ -192,7 +192,7 @@ test("User can create, like and unlike a post", async ({ page, request }) => {
     expect(signup.status()).toBe(201);
 
     // Step 2: Open Social Lite and log in.
-    await page.goto("http://localhost:5173");
+    await page.goto(APP_URL);
 
     await page.getByRole("button", { name: "Log in" }).click();
 
