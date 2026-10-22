@@ -251,6 +251,8 @@ jobs:
         name: Remove staging
         needs: deploy
         runs-on: ubuntu-latest
+        # The AWS keys are environment secrets, so this job needs an environment to read them
+        environment: production
         # Waits for a staging deploy that is already running, so one is never deleted halfway through
         concurrency:
             group: deploy-staging
