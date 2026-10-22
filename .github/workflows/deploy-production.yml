@@ -65,6 +65,21 @@ jobs:
                   echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
             # ---- 2. Create or update the infrastructure ----
+            # A stack whose first create failed can't be updated, only deleted. These states
+            # only happen when the stack was never created, so there is no data to lose.
+            - name: Remove a failed production stack
+              run: |
+                  set -euo pipefail
+                  STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                    --query "Stacks[0].StackStatus" --output text 2> /dev/null || echo NONE)
+                  echo "$STACK_NAME status: $STATUS"
+
+                  if [ "$STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STATUS" = "ROLLBACK_FAILED" ]; then
+                    echo "Deleting $STACK_NAME so it can be created again..."
+                    aws cloudformation delete-stack --stack-name "$STACK_NAME"
+                    aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+                  fi
+
             - name: Look up the network
               id: network
               run: |

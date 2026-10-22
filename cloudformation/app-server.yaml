@@ -62,7 +62,7 @@ Parameters:
         Description: Reset the database and fill it with test data for every new version
 
 Conditions:
-    # Staging's data is thrown away on every release, so it needs no backups or protection
+    # Staging's data is thrown away on every release, so it needs no deletion protection
     KeepsData: !Equals [!Ref SeedDatabase, "false"]
 
 Resources:
@@ -157,8 +157,8 @@ Resources:
                 - !GetAtt DatabaseSecurityGroup.GroupId
             PubliclyAccessible: false
             MultiAZ: false
-            # Production keeps 7 days of backups, and can be restored to any point in them
-            BackupRetentionPeriod: !If [KeepsData, 7, 0]
+            # No automatic backups. Left out, RDS would default to 1 day.
+            BackupRetentionPeriod: 0
             DeletionProtection: !If [KeepsData, true, false]
             Tags:
                 - Key: Name
