@@ -2,6 +2,10 @@ const authService = require("./auth.service");
 const { AuthBody } = require("../../schemas");
 
 exports.signup = async (req, res) => {
+    // an invalid or expired token counts as logged out, so only a valid one is refused
+    if (authService.userFromHeader(req.headers.authorization)) {
+        return res.status(403).json({ error: "you are already logged in" });
+    }
     const body = AuthBody.safeParse(req.body ?? {});
     if (!body.success) {
         return res.status(400).json({ error: body.error.issues[0].message });
