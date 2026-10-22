@@ -10,6 +10,7 @@ router.get("/:id", validaId, ctrl.getPost);
 // requireAuth runs first so only logged in users can upload
 router.post("/", requireAuth, uploadImage, validPostContent, ctrl.createPost);
 router.patch("/:id", requireAuth, validaId, validPostContent, ctrl.updatePost);
+router.delete("/:id", requireAuth, validaId, ctrl.deletePost);
 
 router.post("/:id/like", requireAuth, validaId, ctrl.likePost);
 router.delete("/:id/like", requireAuth, validaId, ctrl.unlikePost);

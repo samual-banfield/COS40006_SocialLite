@@ -30,6 +30,13 @@ exports.updatePost = async (req, res) => {
     res.json(post);
 };
 
+exports.deletePost = async (req, res) => {
+    const deleted = await postService.deletePost(req.params.id, req.user.id);
+    if (deleted === null) return notFound(res);
+    if (deleted === false) return res.status(403).json({ error: "you can only delete your own posts" });
+    res.status(204).end();
+};
+
 exports.likePost = async (req, res) => {
     if (!(await postService.likePost(req.params.id, req.user.id))) return notFound(res);
     await exports.getPost(req, res);

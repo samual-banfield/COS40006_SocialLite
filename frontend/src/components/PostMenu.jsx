@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./PostMenu.css";
 
 // the "..." button in the top right of a post, with a dropdown of actions
-function PostMenu({ onEdit }) {
+function PostMenu({ onEdit, onDelete }) {
     const [open, setOpen] = useState(false);
     const menuRef = useRef(null);
 
@@ -57,6 +57,17 @@ function PostMenu({ onEdit }) {
                         }}
                     >
                         Edit post
+                    </button>
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className="post-menu-item post-menu-item-danger"
+                        onClick={() => {
+                            setOpen(false);
+                            onDelete();
+                        }}
+                    >
+                        Delete post
                     </button>
                 </div>
             )}

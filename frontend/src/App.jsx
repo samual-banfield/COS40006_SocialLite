@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
     createPost,
+    deletePost,
     getFeed,
     getPost,
     likePost,
@@ -54,6 +55,9 @@ function App() {
     const openPost = posts.find((p) => p.id === openPostId);
     const editingPost = posts.find((p) => p.id === editingPostId);
 
+    // only the author can edit or delete a post, the backend checks this too
+    const isMine = (post) => Boolean(user && post && post.username === user.username);
+
     function replacePost(updated) {
         setPosts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
     }
@@ -94,6 +98,13 @@ function App() {
         setEditingPostId(null);
     }
 
+    // errors are left to bubble up so the post can show them
+    async function handleDeletePost(id) {
+        await deletePost(id);
+        setPosts((prev) => prev.filter((p) => p.id !== id));
+        if (openPostId === id) setOpenPostId(null);
+    }
+
     async function handleToggleLike(post) {
         if (!user) {
             setLoginOpen(true);
@@ -124,7 +135,12 @@ function App() {
                         onBack={() => setOpenPostId(null)}
                         onToggleLike={handleToggleLike}
                         onEdit={
-                            user ? () => setEditingPostId(openPost.id) : undefined
+                            isMine(openPost) ? () => setEditingPostId(openPost.id) : undefined
+                        }
+                        onDelete={
+                            isMine(openPost)
+                                ? () => handleDeletePost(openPost.id)
+                                : undefined
                         }
                     />
                 ) : (
@@ -139,6 +155,7 @@ function App() {
                         }}
                         onToggleLike={handleToggleLike}
                         onEditPost={setEditingPostId}
+                        onDeletePost={handleDeletePost}
                     />
                 )}
             </main>
@@ -157,7 +174,7 @@ function App() {
                 onSubmit={handleNewPost}
             />
 
-            {editingPost && user && (
+            {isMine(editingPost) && (
                 <EditPostModal
                     key={editingPost.id}
                     post={editingPost}
