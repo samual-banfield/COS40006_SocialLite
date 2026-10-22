@@ -45,3 +45,7 @@
 .post-menu-item:hover {
     background: var(--bg);
 }
+
+.post-menu-item-danger {
+    color: var(--error);
+}

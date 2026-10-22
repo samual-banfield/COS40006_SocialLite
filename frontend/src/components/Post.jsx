@@ -25,7 +25,7 @@ export function PostAuthor({ username, createdAt, size }) {
 }
 
 // a post in the feed, clicking it opens the full post.
-function Post({ post, user, onOpen, onToggleLike, onEdit }) {
+function Post({ post, user, onOpen, onToggleLike, onEdit, onDelete }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
 
@@ -33,11 +33,12 @@ function Post({ post, user, onOpen, onToggleLike, onEdit }) {
     const likeCount = post.likes ?? 0;
     const liked = !!user && !!post.likedByMe;
 
-    async function toggleLike() {
+    // runs a like or delete request, showing any failure under the post
+    async function run(action) {
         setBusy(true);
         setError("");
         try {
-            await onToggleLike(post);
+            await action(post);
         } catch (err) {
             setError(err.message);
         } finally {
@@ -81,7 +82,7 @@ function Post({ post, user, onOpen, onToggleLike, onEdit }) {
                 <button
                     type="button"
                     className={`post-likes${liked ? " is-liked" : ""}`}
-                    onClick={toggleLike}
+                    onClick={() => run(onToggleLike)}
                     disabled={busy}
                     aria-pressed={liked}
                     aria-label={`Like post, ${likeCount} ${likeCount === 1 ? "like" : "likes"}`}
@@ -107,7 +108,7 @@ function Post({ post, user, onOpen, onToggleLike, onEdit }) {
                     </p>
                 )}
             </div>
-            {onEdit && <PostMenu onEdit={onEdit} />}
+            {onEdit && <PostMenu onEdit={onEdit} onDelete={() => run(onDelete)} />}
         </div>
     );
 }

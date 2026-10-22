@@ -5,15 +5,15 @@ import { paragraphsOf } from "../format.js";
 import "./PostView.css";
 
 // the full post, shown in place of the feed.
-// onEdit is passed whenever a user is logged in
-function PostView({ post, user, onBack, onToggleLike, onEdit }) {
+// onEdit and onDelete are only passed when the logged in user wrote the post
+function PostView({ post, user, onBack, onToggleLike, onEdit, onDelete }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
 
     const likeCount = post.likes ?? 0;
     const liked = !!user && post.likedByMe;
 
-    // runs a like request, showing any failure under the post
+    // runs a like or delete request, showing any failure under the post
     async function run(action) {
         setBusy(true);
         setError("");
@@ -50,7 +50,7 @@ function PostView({ post, user, onBack, onToggleLike, onEdit }) {
             </button>
 
             <article className="card post-view-article">
-                {onEdit && <PostMenu onEdit={onEdit} />}
+                {onEdit && <PostMenu onEdit={onEdit} onDelete={() => run(onDelete)} />}
                 <PostAuthor username={post.username} createdAt={post.createdAt} size="lg" />
                 {post.title && <h1 className="post-view-title">{post.title}</h1>}
                 {post.image && (

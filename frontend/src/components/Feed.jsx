@@ -1,7 +1,19 @@
 import Post from "./Post.jsx";
 import "./Feed.css";
 
-function Feed({ posts, user, loading, error, onOpenPost, onToggleLike, onEditPost }) {
+function Feed({
+    posts,
+    user,
+    loading,
+    error,
+    onOpenPost,
+    onToggleLike,
+    onEditPost,
+    onDeletePost,
+}) {
+    // the edit/delete menu only shows on the user's own posts
+    const isMine = (post) => user?.username === post.username;
+
     return (
         <section className="feed">
             <h1 className="feed-heading">Feed</h1>
@@ -19,7 +31,8 @@ function Feed({ posts, user, loading, error, onOpenPost, onToggleLike, onEditPos
                     user={user}
                     onOpen={() => onOpenPost(post.id)}
                     onToggleLike={onToggleLike}
-                    onEdit={user ? () => onEditPost(post.id) : undefined}
+                    onEdit={isMine(post) ? () => onEditPost(post.id) : undefined}
+                    onDelete={isMine(post) ? () => onDeletePost(post.id) : undefined}
                 />
             ))}
         </section>
