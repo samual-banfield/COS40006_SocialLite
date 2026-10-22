@@ -56,6 +56,8 @@ exports.Post = z.strictObject({
     title: z.string(),
     content: z.string(),
     image: z.string().nullable(),
+    // dates are sent as iso strings in the json
+    createdAt: z.iso.datetime(),
     username: z.string(),
     likes: z.number().int().nonnegative(),
     likedByMe: z.boolean(),
