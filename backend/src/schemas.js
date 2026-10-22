@@ -3,8 +3,8 @@ const { z } = require("zod");
 const TITLE_MAX = 100;
 const CONTENT_MAX = 500;
 
-const postContentError =
-    "posts must have a title and content containing a non-whitespace string";
+const postTitleError = "posts must have a title containing a non-whitespace string";
+const postContentError = "post content must be a string";
 const postLengthError = `titles are limited to ${TITLE_MAX} characters and content to ${CONTENT_MAX}`;
 
 exports.Id = z.coerce
@@ -14,15 +14,16 @@ exports.Id = z.coerce
 
 exports.CreatePostBody = z.object({
     title: z
-        .string({ error: postContentError })
+        .string({ error: postTitleError })
         .trim()
-        .min(1, postContentError)
+        .min(1, postTitleError)
         .max(TITLE_MAX, postLengthError),
+    // content is optional, a post only needs a title
     content: z
         .string({ error: postContentError })
         .trim()
-        .min(1, postContentError)
-        .max(CONTENT_MAX, postLengthError),
+        .max(CONTENT_MAX, postLengthError)
+        .default(""),
 });
 
 const USERNAME_MAX = 32; // matches the sql
@@ -55,6 +56,8 @@ exports.Post = z.strictObject({
     title: z.string(),
     content: z.string(),
     image: z.string().nullable(),
+    // dates are sent as iso strings in the json
+    createdAt: z.iso.datetime(),
     username: z.string(),
     likes: z.number().int().nonnegative(),
     likedByMe: z.boolean(),
