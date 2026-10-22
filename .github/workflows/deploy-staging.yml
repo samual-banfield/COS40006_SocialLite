@@ -1,16 +1,5 @@
-# Builds the app and replaces the staging server with a fresh one.
-#
-# Run by the Promote branches workflow after Development is merged into Staging,
-# or by hand from the Actions tab.
-#
-# Each run deletes the old staging stack, database included, so staging always
-# starts with fresh test data.
-#
-# Needs these secrets in the "staging" GitHub environment:
-#   AWS_ACCESS_KEY_ID      access key of the IAM user that deploys
-#   AWS_SECRET_ACCESS_KEY  secret for that access key
-#   DB_PASSWORD            letters and numbers only, at least 8 characters
-#   JWT_SECRET             at least 16 characters
+# If every test passes, the image is tagged "tested-<code hash>".
+# Requires: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, JWT_SECRET, DB_PASSWORD in GitHub secrets
 
 name: Deploy staging
 
@@ -47,60 +36,25 @@ env:
     TEMPLATE: cloudformation/app-server.yaml
 
 jobs:
-    validate-template:
-        name: Validate CloudFormation
+    validate:
+        name: Check CloudFormation templates
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
               with:
                   ref: ${{ inputs.ref }}
 
-            - uses: actions/setup-python@v5
-              with:
-                  python-version: "3.11"
+            - name: Lint templates
+              run: pipx run cfn-lint cloudformation/*.yaml
 
-            - run: pip install PyYAML
-
-            # Checks the template is valid YAML and has a CPU alarm
-            - name: Check template
+            - name: Check the server has a CPU alarm
               run: |
-                  python - <<'PY'
-                  import os, yaml
-
-                  # Read CloudFormation tags like !Ref as plain values
-                  class Loader(yaml.SafeLoader):
-                      pass
-
-                  def any_tag(loader, suffix, node):
-                      if isinstance(node, yaml.ScalarNode):
-                          return loader.construct_scalar(node)
-                      if isinstance(node, yaml.SequenceNode):
-                          return loader.construct_sequence(node)
-                      return loader.construct_mapping(node)
-
-                  Loader.add_multi_constructor("!", any_tag)
-
-                  with open(os.environ["TEMPLATE"], encoding="utf-8") as file:
-                      template = yaml.load(file, Loader=Loader)
-
-                  assert isinstance(template, dict), "Template must be a YAML mapping"
-                  assert "Parameters" in template, "Template has no Parameters"
-                  assert "Resources" in template, "Template has no Resources"
-                  print("Template structure is valid.")
-
-                  cpu_alarms = [
-                      resource for resource in template["Resources"].values()
-                      if resource.get("Type") == "AWS::CloudWatch::Alarm"
-                      and resource.get("Properties", {}).get("MetricName") == "CPUUtilization"
-                  ]
-                  assert cpu_alarms, "Template has no CPU alarm"
-                  print("CPU alarm found.")
-                  PY
+                  grep -q 'MetricName: CPUUtilization' "$TEMPLATE"
 
     deploy:
-        name: Build image and replace staging
+        name: Deploy and test staging
         runs-on: ubuntu-latest
-        needs: validate-template
+        needs: validate
         environment:
             name: staging
             url: ${{ steps.stack.outputs.app_url }}
@@ -122,22 +76,29 @@ jobs:
               id: ecr
               uses: aws-actions/amazon-ecr-login@v2
 
-            # Tag the image with the commit it was built from
+            # ---- 1. Build the image ----
+            # The tag is the git tree hash
             - name: Build and push image
               id: image
               env:
                   REGISTRY: ${{ steps.ecr.outputs.registry }}
               run: |
                   set -euo pipefail
-                  TAG=$(git rev-parse --short=12 HEAD)
+                  TAG=$(git rev-parse --short=12 "HEAD^{tree}")
                   IMAGE="$REGISTRY/$IMAGE_REPOSITORY:$TAG"
 
-                  docker build -t "$IMAGE" .
-                  docker push "$IMAGE"
+                  if aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="$TAG" > /dev/null 2>&1; then
+                    echo "$IMAGE was already built. Reusing it."
+                  else
+                    docker build --build-arg APP_VERSION="$TAG" -t "$IMAGE" .
+                    docker push "$IMAGE"
+                  fi
 
                   echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+                  echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-            - name: Find the default VPC and subnet
+            # ---- 2. Replace the staging server ----
+            - name: Look up the default network and latest Amazon Linux image
               id: network
               run: |
                   set -euo pipefail
@@ -154,9 +115,14 @@ jobs:
                     --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true \
                     --query "sort_by(Subnets, &AvailabilityZone)[0].SubnetId" --output text)
 
-                  echo "Using VPC $VPC_ID and subnet $SUBNET_ID"
+                  AMI_ID=$(aws ec2 describe-images --owners amazon \
+                    --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
+                    --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
+
+                  echo "Using VPC $VPC_ID, subnet $SUBNET_ID and image $AMI_ID"
                   echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
                   echo "subnet_id=$SUBNET_ID" >> "$GITHUB_OUTPUT"
+                  echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
 
             - name: Delete the old staging stack
               run: |
@@ -169,12 +135,13 @@ jobs:
                     echo "No existing $STACK_NAME stack."
                   fi
 
-            - name: Create the new staging stack
+            - name: Create the new staging stack with test data
               env:
                   DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
                   JWT_SECRET: ${{ secrets.JWT_SECRET }}
                   VPC_ID: ${{ steps.network.outputs.vpc_id }}
                   SUBNET_ID: ${{ steps.network.outputs.subnet_id }}
+                  AMI_ID: ${{ steps.network.outputs.ami_id }}
                   IMAGE_TAG: ${{ steps.image.outputs.tag }}
               run: |
                   aws cloudformation deploy \
@@ -184,6 +151,7 @@ jobs:
                     --parameter-overrides \
                       VpcId="$VPC_ID" \
                       SubnetId="$SUBNET_ID" \
+                      AmiId="$AMI_ID" \
                       ImageRepository="$IMAGE_REPOSITORY" \
                       ImageTag="$IMAGE_TAG" \
                       DbPassword="$DB_PASSWORD" \
@@ -207,21 +175,16 @@ jobs:
                   echo "Staging is at $APP_URL"
                   echo "app_url=$APP_URL" >> "$GITHUB_OUTPUT"
 
-    smoke-test:
-        name: Test deployed application
-        runs-on: ubuntu-latest
-        needs: deploy
-        env:
-            APP_URL: ${{ needs.deploy.outputs.app_url }}
-        steps:
-            # The stack is done once the server is running, but the server still has
-            # to install Docker and set up MySQL, so wait up to 10 minutes
+            # ---- 3. Test the running app ----
+            # The stack is done once the server is running, but the server still has to install Docker and set up MySQL, so wait up to 10 minutes
             - name: Wait for the app to start
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
+                  TAG: ${{ steps.image.outputs.tag }}
               run: |
                   for attempt in $(seq 1 40); do
-                    if curl --fail --silent --show-error "$APP_URL/api/health"; then
-                      echo
-                      echo "Health check passed."
+                    if curl --fail --silent "$APP_URL/api/health" | grep -q "\"version\":\"$TAG\""; then
+                      echo "Health check passed. Running version $TAG."
                       exit 0
                     fi
 
@@ -233,32 +196,34 @@ jobs:
                   exit 1
 
             - name: Check the home page loads
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
               run: |
                   # Save the page first. Piping curl into grep -q can fail when grep exits early.
                   PAGE=$(curl --fail --silent --show-error "$APP_URL/")
                   echo "$PAGE" | grep -q '<title>SocialLite</title>'
                   echo "Home page check passed."
 
-    e2e-test:
-        name: Playwright E2E Tests
-        runs-on: ubuntu-latest
-        needs: [deploy, smoke-test]
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  ref: ${{ inputs.ref }}
-
             - uses: actions/setup-node@v4
               with:
                   node-version: "20"
 
-            - name: Install Playwright
+            - name: Run Playwright end-to-end tests
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
               run: |
-                  npm init -y
+                  npm init -y > /dev/null
                   npm install --save-dev @playwright/test
                   npx playwright install --with-deps chromium
+                  npx playwright test e2e/app.spec.js
 
-            - name: Run Playwright tests
+            # ---- 4. Mark the image as tested ----
+            # Adds a second tag to the same image. Nothing is rebuilt or copied.
+            - name: Tag the image as tested
               env:
-                  APP_URL: ${{ needs.deploy.outputs.app_url }}
-              run: npx playwright test e2e/app.spec.js
+                  IMAGE: ${{ steps.image.outputs.image }}
+                  REGISTRY: ${{ steps.ecr.outputs.registry }}
+                  TAG: ${{ steps.image.outputs.tag }}
+              run: |
+                  docker buildx imagetools create --tag "$REGISTRY/$IMAGE_REPOSITORY:tested-$TAG" "$IMAGE"
+                  echo "Tagged $IMAGE as tested-$TAG"

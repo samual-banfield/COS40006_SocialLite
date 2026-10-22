@@ -31,6 +31,10 @@ RUN DATABASE_URL=mysql://build:build@localhost:3306/build npm ci
 COPY backend ./
 COPY --from=frontend /frontend/dist ./public
 
+# The code hash this image was built from, shown by /api/health
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+
 EXPOSE 3000
 
 # Update the database tables, then start the server

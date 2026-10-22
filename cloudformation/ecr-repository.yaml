@@ -15,13 +15,25 @@ Resources:
         Type: AWS::ECR::Repository
         Properties:
             RepositoryName: !Ref RepositoryName
-            # Each deploy pushes a new image, so only keep the latest 10
+            # Each deploy pushes a new image, so only keep the latest 10.
+            # Rule 1 keeps the image tagged "production", however old it is.
             LifecyclePolicy:
                 LifecyclePolicyText: |
                     {
                       "rules": [
                         {
                           "rulePriority": 1,
+                          "description": "Never expire the production image",
+                          "selection": {
+                            "tagStatus": "tagged",
+                            "tagPrefixList": ["production"],
+                            "countType": "imageCountMoreThan",
+                            "countNumber": 1
+                          },
+                          "action": { "type": "expire" }
+                        },
+                        {
+                          "rulePriority": 2,
                           "description": "Keep the 10 most recent images",
                           "selection": {
                             "tagStatus": "any",
