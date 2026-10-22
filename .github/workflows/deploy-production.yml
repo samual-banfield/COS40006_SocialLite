@@ -26,6 +26,7 @@ env:
     STACK_NAME: social-lite-production
     IMAGES_STACK_NAME: social-lite-production-images
     STAGING_STACK_NAME: social-lite-staging
+    STAGING_LOAD_TESTER_STACK_NAME: social-lite-staging-load-tester
     IMAGE_REPOSITORY: social-lite-app
     TEMPLATE: cloudformation/app-server.yaml
     IMAGES_TEMPLATE: cloudformation/image-bucket.yaml
@@ -261,6 +262,12 @@ jobs:
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
                   aws-region: ${{ env.AWS_REGION }}
+
+            # Staging deletes its load tester after every test, but a cancelled run can leave it behind
+            - name: Delete the staging load tester
+              run: |
+                  aws cloudformation delete-stack --stack-name "$STAGING_LOAD_TESTER_STACK_NAME"
+                  aws cloudformation wait stack-delete-complete --stack-name "$STAGING_LOAD_TESTER_STACK_NAME"
 
             # The template keeps a snapshot of a deleted database. Staging's data is test data
             # that is reseeded on every deploy, so its snapshots are deleted too.

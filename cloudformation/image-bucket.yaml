@@ -60,6 +60,12 @@ Resources:
                         Status: Enabled
                         Prefix: posts/
                         ExpirationInDays: 14
+            # Staging sends request counts, errors and latency to CloudWatch every minute, for the
+            # load test to check. S3 only reports storage size, once a day, without this.
+            MetricsConfigurations: !If
+                - IsProduction
+                - !Ref AWS::NoValue
+                - - Id: EntireBucket
             Tags:
                 - Key: Name
                   Value: !Ref AWS::StackName
