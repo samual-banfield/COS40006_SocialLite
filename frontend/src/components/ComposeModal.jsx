@@ -6,12 +6,17 @@ import "./ComposeModal.css";
 // keep in sync with backend/src/middleware/validPostContent.js
 const MAX_TITLE = 100;
 const MAX_CHARS = 500;
+// keep in sync with backend/src/middleware/uploadImage.js
+const MAX_IMAGE_MB = 5;
+const IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 // new post form, same native <dialog> pattern as the login modal
 function ComposeModal({ open, user, onClose, onSubmit }) {
     const dialogRef = useRef(null);
+    const fileRef = useRef(null);
     const [title, setTitle] = useState("");
     const [content, setContent] = useState("");
+    const [image, setImage] = useState(null);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState("");
 
@@ -23,6 +28,24 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
 
     const canPost = title.trim() !== "" && content.trim() !== "" && !submitting;
 
+    // the server checks these too, this just saves uploading a file it would reject
+    function handleFile(e) {
+        const file = e.target.files[0];
+        // cleared so picking the same file again still counts as a change
+        e.target.value = "";
+        if (!file) return;
+        if (!IMAGE_TYPES.includes(file.type)) {
+            setError("images must be a jpeg, png, gif or webp");
+            return;
+        }
+        if (file.size > MAX_IMAGE_MB * 1024 * 1024) {
+            setError(`images are limited to ${MAX_IMAGE_MB}MB`);
+            return;
+        }
+        setError("");
+        setImage(file);
+    }
+
     // on success the parent closes the modal, which clears the form via handleClose
     async function handleSubmit(e) {
         e.preventDefault();
@@ -30,7 +53,7 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
         setSubmitting(true);
         setError("");
         try {
-            await onSubmit({ title: title.trim(), content: content.trim() });
+            await onSubmit({ title: title.trim(), content: content.trim(), image });
         } catch (err) {
             setError(err.message);
         } finally {
@@ -41,6 +64,7 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
     function handleClose() {
         setTitle("");
         setContent("");
+        setImage(null);
         setError("");
         onClose();
     }
@@ -108,6 +132,62 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
                                 setContent(e.target.value.slice(0, MAX_CHARS))
                             }
                             placeholder="What’s on your mind?"
+                        />
+                    </div>
+                    <div className="field">
+                        {image ? (
+                            <div className="compose-image">
+                                <span className="compose-image-name">{image.name}</span>
+                                <button
+                                    type="button"
+                                    className="btn-icon"
+                                    onClick={() => setImage(null)}
+                                    aria-label="Remove image"
+                                >
+                                    <svg
+                                        width="16"
+                                        height="16"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="2.2"
+                                        strokeLinecap="round"
+                                        aria-hidden="true"
+                                    >
+                                        <path d="M6 6l12 12M18 6L6 18" />
+                                    </svg>
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                type="button"
+                                className="btn btn-secondary compose-image-add"
+                                onClick={() => fileRef.current.click()}
+                            >
+                                <svg
+                                    width="18"
+                                    height="18"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    aria-hidden="true"
+                                >
+                                    <rect x="3" y="4" width="18" height="16" rx="2" />
+                                    <circle cx="9" cy="10" r="1.75" />
+                                    <path d="M21 16l-5-5-9 9" />
+                                </svg>
+                                Add image
+                            </button>
+                        )}
+                        <input
+                            ref={fileRef}
+                            type="file"
+                            accept={IMAGE_TYPES.join(",")}
+                            onChange={handleFile}
+                            hidden
                         />
                     </div>
                     {error && (

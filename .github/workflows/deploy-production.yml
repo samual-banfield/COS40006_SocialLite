@@ -1,0 +1,306 @@
+# Requires: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, JWT_SECRET, DB_PASSWORD in GitHub secrets
+# The first run creates the production stack. Later runs update it in place.
+# Once the release is live, staging is removed. The next staging deploy creates it again.
+name: Deploy production
+
+on:
+    push:
+        branches: [Production]
+    workflow_dispatch:
+        inputs:
+            ref:
+                description: Branch or commit to deploy
+                type: string
+                default: Production
+
+permissions:
+    contents: read
+
+# Never run two releases at once
+concurrency:
+    group: deploy-production
+    cancel-in-progress: false
+
+env:
+    AWS_REGION: ap-southeast-2
+    STACK_NAME: social-lite-production
+    IMAGES_STACK_NAME: social-lite-production-images
+    STAGING_STACK_NAME: social-lite-staging
+    STAGING_LOAD_TESTER_STACK_NAME: social-lite-staging-load-tester
+    IMAGE_REPOSITORY: social-lite-app
+    TEMPLATE: cloudformation/app-server.yaml
+    IMAGES_TEMPLATE: cloudformation/image-bucket.yaml
+
+jobs:
+    deploy:
+        name: Release to production
+        runs-on: ubuntu-latest
+        environment:
+            name: production
+            url: ${{ steps.stack.outputs.app_url }}
+        steps:
+            - uses: actions/checkout@v5
+              with:
+                  ref: ${{ inputs.ref || github.sha }}
+
+            - name: Log in to AWS
+              uses: aws-actions/configure-aws-credentials@v5
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ env.AWS_REGION }}
+
+            - name: Log in to ECR
+              id: ecr
+              uses: aws-actions/amazon-ecr-login@v2
+
+            # ---- 1. Find the tested image ----
+            - name: Find the image staging tested
+              id: image
+              run: |
+                  set -euo pipefail
+                  VERSION=$(git rev-parse --short=12 "HEAD^{tree}")
+
+                  if ! aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="tested-$VERSION" > /dev/null 2>&1; then
+                    echo "::error::No image tagged tested-$VERSION. This code hasn't passed staging yet."
+                    exit 1
+                  fi
+
+                  echo "Releasing version $VERSION"
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+            # ---- 2. Create or update the infrastructure ----
+            # A stack whose first create failed can't be updated, only deleted. These states
+            # only happen when the stack was never created, so there is no data to lose.
+            - name: Remove a failed production stack
+              run: |
+                  set -euo pipefail
+                  STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                    --query "Stacks[0].StackStatus" --output text 2> /dev/null || echo NONE)
+                  echo "$STACK_NAME status: $STATUS"
+
+                  if [ "$STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STATUS" = "ROLLBACK_FAILED" ]; then
+                    echo "Deleting $STACK_NAME so it can be created again..."
+                    aws cloudformation delete-stack --stack-name "$STACK_NAME"
+                    aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+                  fi
+
+            - name: Look up the network
+              id: network
+              run: |
+                  set -euo pipefail
+                  if aws cloudformation describe-stacks --stack-name "$STACK_NAME" > /dev/null 2>&1; then
+                    echo "exists=true" >> "$GITHUB_OUTPUT"
+                    # Stay in the VPC the stack was created in
+                    VPC_ID=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME"                       --query "Stacks[0].Parameters[?ParameterKey=='VpcId'].ParameterValue" --output text)
+                  else
+                    echo "exists=false" >> "$GITHUB_OUTPUT"
+                    echo "$STACK_NAME doesn't exist yet, so it will be created."
+                    VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true                       --query "Vpcs[0].VpcId" --output text)
+
+                    if [ "$VPC_ID" = "None" ]; then
+                      echo "::error::No default VPC in $AWS_REGION. Create one with: aws ec2 create-default-vpc --region $AWS_REGION"
+                      exit 1
+                    fi
+                  fi
+
+                  # Default subnets are public, one in each availability zone. The load balancer,
+                  # servers and database all need at least two zones.
+                  SUBNET_IDS=$(aws ec2 describe-subnets \
+                    --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true \
+                    --query "Subnets[].SubnetId" --output text | tr '\t' ',')
+
+                  AMI_ID=$(aws ec2 describe-images --owners amazon \
+                    --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
+                    --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
+
+                  echo "Using VPC $VPC_ID and subnets $SUBNET_IDS"
+                  echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
+                  echo "subnet_ids=$SUBNET_IDS" >> "$GITHUB_OUTPUT"
+                  echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+
+            # Creates the bucket on the first run. Later runs leave it alone, and the
+            # bucket is kept even if this stack is deleted.
+            - name: Create or update the production image bucket
+              id: bucket
+              run: |
+                  set -euo pipefail
+                  aws cloudformation deploy \
+                    --stack-name "$IMAGES_STACK_NAME" \
+                    --template-file "$IMAGES_TEMPLATE" \
+                    --no-fail-on-empty-changeset \
+                    --parameter-overrides Environment=production
+
+                  BUCKET=$(aws cloudformation describe-stacks --stack-name "$IMAGES_STACK_NAME" \
+                    --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text)
+                  echo "Production images are stored in $BUCKET"
+                  echo "name=$BUCKET" >> "$GITHUB_OUTPUT"
+
+            # Runs once. Creating the database takes about 10 minutes. The servers start
+            # the app once the image is tagged as production, in step 3.
+            # Production keeps 1 server, and adds a second in another zone when CPU is high.
+            - name: Create the production stack
+              if: steps.network.outputs.exists == 'false'
+              env:
+                  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+                  JWT_SECRET: ${{ secrets.JWT_SECRET }}
+                  VPC_ID: ${{ steps.network.outputs.vpc_id }}
+                  SUBNET_IDS: ${{ steps.network.outputs.subnet_ids }}
+                  AMI_ID: ${{ steps.network.outputs.ami_id }}
+                  IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
+              run: |
+                  aws cloudformation deploy \
+                    --stack-name "$STACK_NAME" \
+                    --template-file "$TEMPLATE" \
+                    --capabilities CAPABILITY_IAM \
+                    --parameter-overrides \
+                      VpcId="$VPC_ID" \
+                      SubnetIds="$SUBNET_IDS" \
+                      MinServers=1 \
+                      MaxServers=2 \
+                      AmiId="$AMI_ID" \
+                      ImageRepository="$IMAGE_REPOSITORY" \
+                      ImageTag=production \
+                      DbPassword="$DB_PASSWORD" \
+                      JwtSecret="$JWT_SECRET" \
+                      SeedDatabase=false \
+                      ImageBucket="$IMAGE_BUCKET"
+
+            # Only the subnets, server counts and ImageBucket are passed, so CloudFormation keeps the other
+            # values the stack was created with, including the servers' image. Only template changes are applied.
+            # Replacing the servers waits until every new one's app is healthy, then removes the old ones.
+            - name: Apply template changes
+              if: steps.network.outputs.exists == 'true'
+              env:
+                  SUBNET_IDS: ${{ steps.network.outputs.subnet_ids }}
+                  IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
+              run: |
+                  aws cloudformation deploy \
+                    --stack-name "$STACK_NAME" \
+                    --template-file "$TEMPLATE" \
+                    --capabilities CAPABILITY_IAM \
+                    --no-fail-on-empty-changeset \
+                    --parameter-overrides \
+                      SubnetIds="$SUBNET_IDS" \
+                      MinServers=1 \
+                      MaxServers=2 \
+                      ImageBucket="$IMAGE_BUCKET"
+
+            - name: Show why the stack failed
+              if: failure()
+              run: |
+                  for STACK in "$IMAGES_STACK_NAME" "$STACK_NAME"; do
+                    aws cloudformation describe-stack-events --stack-name "$STACK" \
+                      --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
+                      --output table || true
+                  done
+
+            # ---- 3. Release the image ----
+            # Adds a tag to the tested image.
+            - name: Tag the tested image as production
+              env:
+                  REGISTRY: ${{ steps.ecr.outputs.registry }}
+                  VERSION: ${{ steps.image.outputs.version }}
+              run: |
+                  docker buildx imagetools create \
+                    --tag "$REGISTRY/$IMAGE_REPOSITORY:production" \
+                    "$REGISTRY/$IMAGE_REPOSITORY:tested-$VERSION"
+
+            # ---- 4. Check the running app ----
+            - name: Get the app URL
+              id: stack
+              run: |
+                  set -euo pipefail
+                  APP_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                    --query "Stacks[0].Outputs[?OutputKey=='AppURL'].OutputValue" --output text)
+
+                  echo "Production is at $APP_URL"
+                  echo "app_url=$APP_URL" >> "$GITHUB_OUTPUT"
+
+            # Each server checks for the new image every minute, so wait up to 10 minutes
+            - name: Wait for the new version to go live
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
+                  VERSION: ${{ steps.image.outputs.version }}
+              run: |
+                  for attempt in $(seq 1 40); do
+                    if curl --fail --silent "$APP_URL/api/health" | grep -q "\"version\":\"$VERSION\""; then
+                      echo "Health check passed. Running version $VERSION."
+                      exit 0
+                    fi
+
+                    echo "Attempt $attempt: not live yet. Retrying in 15 seconds..."
+                    sleep 15
+                  done
+
+                  echo "::error::Production is not running version $VERSION."
+                  exit 1
+
+            - name: Check the home page loads
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
+              run: |
+                  # Save the page first. Piping curl into grep -q can fail when grep exits early.
+                  PAGE=$(curl --fail --silent --show-error "$APP_URL/")
+                  echo "$PAGE" | grep -q '<title>SocialLite</title>'
+                  echo "Home page check passed."
+
+    # Staging only needs to run while a release is being tested. Its tested image stays in ECR,
+    # and its image bucket is kept, so only the servers, load balancer and database are removed.
+    remove-staging:
+        name: Remove staging
+        needs: deploy
+        runs-on: ubuntu-latest
+        # Waits for a staging deploy that is already running, so one is never deleted halfway through
+        concurrency:
+            group: deploy-staging
+            cancel-in-progress: false
+        steps:
+            - name: Log in to AWS
+              uses: aws-actions/configure-aws-credentials@v5
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ env.AWS_REGION }}
+
+            # Staging deletes its load tester after every test, but a cancelled run can leave it behind
+            - name: Delete the staging load tester
+              run: |
+                  aws cloudformation delete-stack --stack-name "$STAGING_LOAD_TESTER_STACK_NAME"
+                  aws cloudformation wait stack-delete-complete --stack-name "$STAGING_LOAD_TESTER_STACK_NAME"
+
+            # The template keeps a snapshot of a deleted database. Staging's data is test data
+            # that is reseeded on every deploy, so its snapshots are deleted too.
+            - name: Delete the staging stack and its database snapshots
+              run: |
+                  set -euo pipefail
+                  if ! aws cloudformation describe-stacks --stack-name "$STAGING_STACK_NAME" > /dev/null 2>&1; then
+                    echo "Staging has already been removed."
+                    exit 0
+                  fi
+
+                  DB_ID=$(aws cloudformation describe-stack-resource --stack-name "$STAGING_STACK_NAME" \
+                    --logical-resource-id Database \
+                    --query "StackResourceDetail.PhysicalResourceId" --output text 2> /dev/null || echo "")
+
+                  echo "Deleting $STAGING_STACK_NAME..."
+                  aws cloudformation delete-stack --stack-name "$STAGING_STACK_NAME"
+                  aws cloudformation wait stack-delete-complete --stack-name "$STAGING_STACK_NAME"
+                  echo "Deleted $STAGING_STACK_NAME."
+
+                  if [ -n "$DB_ID" ] && [ "$DB_ID" != "None" ]; then
+                    SNAPSHOTS=$(aws rds describe-db-snapshots --db-instance-identifier "$DB_ID" \
+                      --snapshot-type manual --query "DBSnapshots[].DBSnapshotIdentifier" --output text)
+                    for SNAPSHOT in $SNAPSHOTS; do
+                      aws rds wait db-snapshot-available --db-snapshot-identifier "$SNAPSHOT"
+                      aws rds delete-db-snapshot --db-snapshot-identifier "$SNAPSHOT" > /dev/null
+                      echo "Deleted database snapshot $SNAPSHOT."
+                    done
+                  fi
+
+            - name: Show why staging couldn't be deleted
+              if: failure()
+              run: |
+                  aws cloudformation describe-stack-events --stack-name "$STAGING_STACK_NAME" \
+                    --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
+                    --output table || true

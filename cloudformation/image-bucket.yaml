@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: S3 bucket that stores the images attached to Social Lite posts
+
+# One stack per environment, deployed by the deploy workflows before the app stack:
+#   social-lite-staging-images     Environment=staging
+#   social-lite-production-images  Environment=production
+# The first deploy creates the bucket. Later deploys leave it alone unless this template changes.
+#
+# It is kept separate from app-server.yaml so the images outlive the server stack,
+# which the staging workflow deletes and recreates if its first create fails.
+
+Parameters:
+    Environment:
+        Type: String
+        AllowedValues: [staging, production]
+        Description: Which environment the bucket is for
+
+Conditions:
+    IsProduction: !Equals [!Ref Environment, production]
+
+Resources:
+    # Never deleted with the stack, so a mistake can't wipe everyone's images
+    ImageBucket:
+        Type: AWS::S3::Bucket
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+            # Bucket names are shared across all of AWS, so the account id keeps this one unique
+            BucketName: !Sub social-lite-${Environment}-images-${AWS::AccountId}
+            # Private. The app reads images with its IAM role and serves them at /api/images
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+            OwnershipControls:
+                Rules:
+                    - ObjectOwnership: BucketOwnerEnforced
+            BucketEncryption:
+                ServerSideEncryptionConfiguration:
+                    - ServerSideEncryptionByDefault:
+                          SSEAlgorithm: AES256
+            # Production keeps old versions, so a deleted image can be recovered
+            VersioningConfiguration: !If
+                - IsProduction
+                - Status: Enabled
+                - !Ref AWS::NoValue
+            LifecycleConfiguration:
+                Rules:
+                    - !If
+                      - IsProduction
+                      # Production: old versions are kept for 30 days
+                      - Id: ExpireOldVersions
+                        Status: Enabled
+                        NoncurrentVersionExpiration:
+                            NoncurrentDays: 30
+                      # Staging: its database is reset on every deploy, so uploads are
+                      # cleaned up after 14 days. Seed images live under seed/ and are kept.
+                      - Id: ExpireUploads
+                        Status: Enabled
+                        Prefix: posts/
+                        ExpirationInDays: 14
+            # Staging sends request counts, errors and latency to CloudWatch every minute, for the
+            # load test to check. S3 only reports storage size, once a day, without this.
+            MetricsConfigurations: !If
+                - IsProduction
+                - !Ref AWS::NoValue
+                - - Id: EntireBucket
+            Tags:
+                - Key: Name
+                  Value: !Ref AWS::StackName
+
+Outputs:
+    BucketName:
+        Description: Bucket the app stores post images in
+        Value: !Ref ImageBucket

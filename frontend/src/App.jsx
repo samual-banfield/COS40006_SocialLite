@@ -6,6 +6,7 @@ import {
     likePost,
     login,
     setToken,
+    signup,
     unlikePost,
 } from "./api.js";
 import Header from "./components/Header.jsx";
@@ -61,6 +62,12 @@ function App() {
         setLoginOpen(false);
     }
 
+    // create the account, then log in with the same details so the modal closes logged in
+    async function handleSignup({ username, password }) {
+        await signup({ username, password });
+        await handleLogin({ username, password });
+    }
+
     function handleLogout() {
         setToken(null);
         setUser(null);
@@ -68,8 +75,8 @@ function App() {
     }
 
     // errors are left to bubble up so the modal can show them
-    async function handleNewPost({ title, content }) {
-        const post = await createPost({ title, content });
+    async function handleNewPost({ title, content, image }) {
+        const post = await createPost({ title, content, image });
         setPosts((prev) => [post, ...prev]);
         setComposeOpen(false);
         setOpenPostId(null);
@@ -124,6 +131,7 @@ function App() {
                 open={loginOpen}
                 onClose={() => setLoginOpen(false)}
                 onLogin={handleLogin}
+                onSignup={handleSignup}
             />
 
             <ComposeModal
