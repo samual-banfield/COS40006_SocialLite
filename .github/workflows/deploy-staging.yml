@@ -40,7 +40,7 @@ jobs:
         name: Check CloudFormation templates
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
               with:
                   ref: ${{ inputs.ref }}
 
@@ -61,12 +61,12 @@ jobs:
         outputs:
             app_url: ${{ steps.stack.outputs.app_url }}
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
               with:
                   ref: ${{ inputs.ref }}
 
             - name: Log in to AWS
-              uses: aws-actions/configure-aws-credentials@v4
+              uses: aws-actions/configure-aws-credentials@v5
               with:
                   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
                   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -204,9 +204,9 @@ jobs:
                   echo "$PAGE" | grep -q '<title>SocialLite</title>'
                   echo "Home page check passed."
 
-            - uses: actions/setup-node@v4
+            - uses: actions/setup-node@v5
               with:
-                  node-version: "20"
+                  node-version: "24"
 
             - name: Run Playwright end-to-end tests
               env:

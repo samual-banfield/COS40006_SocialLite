@@ -54,9 +54,9 @@ jobs:
             run:
                 working-directory: backend
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
-            - uses: actions/setup-node@v4
+            - uses: actions/setup-node@v5
               with:
                   node-version: "24"
                   cache: npm
@@ -123,6 +123,8 @@ jobs:
         permissions:
             contents: read
         uses: ./.github/workflows/deploy-staging.yml
+        # Called workflows get no secrets unless they are passed on
+        secrets: inherit
         with:
             ref: Staging
 
