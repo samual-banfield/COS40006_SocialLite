@@ -49,7 +49,10 @@ jobs:
 
             - name: Check the server has a CPU alarm
               run: |
-                  grep -q 'MetricName: CPUUtilization' "$TEMPLATE"
+                  if ! grep -q 'MetricName: CPUUtilization' "$TEMPLATE"; then
+                    echo "::error file=$TEMPLATE,title=CloudWatch CPU alarm missing::$TEMPLATE has no CloudWatch alarm on CPUUtilization."
+                    exit 1
+                  fi
 
     deploy:
         name: Deploy and test staging
@@ -215,7 +218,10 @@ jobs:
                   npm init -y > /dev/null
                   npm install --save-dev @playwright/test
                   npx playwright install --with-deps chromium
-                  npx playwright test e2e/app.spec.js
+                  if ! npx playwright test e2e/app.spec.js; then
+                    echo "::error title=E2E tests failed::One or more Playwright tests failed against $APP_URL. Open the 'Run Playwright end-to-end tests' step to see which."
+                    exit 1
+                  fi
 
             # ---- 4. Mark the image as tested ----
             # Adds a second tag to the same image. Nothing is rebuilt or copied.

@@ -113,6 +113,11 @@ Resources:
                   GroupSet:
                       - !Ref SecurityGroup
                   SubnetId: !Ref SubnetId
+            # Shown in the EC2 console's Name column: social-lite-staging or social-lite-production.
+            # Changing tags doesn't replace the server.
+            Tags:
+                - Key: Name
+                  Value: !Ref AWS::StackName
 
             # Runs once, when the server first boots
             UserData:
