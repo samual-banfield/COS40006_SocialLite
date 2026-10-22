@@ -108,12 +108,14 @@ function App() {
                 ) : (
                     <Feed
                         posts={posts}
+                        user={user}
                         loading={loading}
                         error={error}
                         onOpenPost={(id) => {
                             setError(null);
                             setOpenPostId(id);
                         }}
+                        onToggleLike={handleToggleLike}
                     />
                 )}
             </main>
