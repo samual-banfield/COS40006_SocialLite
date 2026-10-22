@@ -1,64 +1,60 @@
-# Enforces the promotion order:
-#   only Development may be merged into Staging
-#   only Staging     may be merged into Production
+# Makes sure code goes through the branches in order:
+#   only Development can be merged into Staging
+#   only Staging can be merged into Production
 #
-# Posts a commit status on every PR into Staging or Production:
-#   "Staging source check"    - PRs into Staging
-#   "Production source check" - PRs into Production
-# Head branch is the previous stage (in this repo) -> success
-# Anything else (feature branch, fork)              -> failure, and the PR is closed
-# Make each status a required check in that branch's ruleset.
+# PRs from any other branch, or from a fork, fail the check and are closed.
+# The check is posted as "Staging source check" or "Production source check".
+# Both are set as required checks in the branch rulesets.
 #
-# pull_request_target runs the copy of this file on the target branch, not the
-# PR's copy, so a PR can't edit this check to make itself pass. It never checks
-# out PR code.
+# pull_request_target uses this file from the target branch, not from the PR,
+# so a PR can't change this check to let itself through.
 
 name: Branch source check
 
 on:
-  pull_request_target:
-    branches: [Staging, Production]
-    types: [opened, reopened, synchronize, edited]
+    pull_request_target:
+        branches: [Staging, Production]
+        types: [opened, reopened, synchronize, edited]
 
 permissions:
-  statuses: write
-  pull-requests: write
+    statuses: write
+    pull-requests: write
 
 jobs:
-  verify-source:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Only allow PRs from the previous stage
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
+    verify-source:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Only allow PRs from the previous stage
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  GH_REPO: ${{ github.repository }}
+                  BASE_REF: ${{ github.event.pull_request.base.ref }}
+                  HEAD_REF: ${{ github.event.pull_request.head.ref }}
+                  HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+                  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+                  PR: ${{ github.event.pull_request.number }}
+              run: |
+                  set -euo pipefail
 
-          case "$BASE_REF" in
-            Staging)    allowed="Development"; context="Staging source check" ;;
-            Production) allowed="Staging";     context="Production source check" ;;
-            *) echo "PR #$PR targets $BASE_REF, which isn't guarded here."; exit 0 ;;
-          esac
+                  case "$BASE_REF" in
+                    Staging)    allowed="Development"; context="Staging source check" ;;
+                    Production) allowed="Staging";     context="Production source check" ;;
+                    *) echo "PR #$PR targets $BASE_REF, which isn't guarded here."; exit 0 ;;
+                  esac
 
-          if [ "$HEAD_REF" = "$allowed" ] && [ "$HEAD_REPO" = "$GH_REPO" ]; then
-            gh api "repos/$GH_REPO/statuses/$HEAD_SHA" \
-              -f state=success -f context="$context" \
-              -f description="Source branch is $allowed" > /dev/null
-            echo "PR #$PR comes from $allowed. OK."
-            exit 0
-          fi
+                  if [ "$HEAD_REF" = "$allowed" ] && [ "$HEAD_REPO" = "$GH_REPO" ]; then
+                    gh api "repos/$GH_REPO/statuses/$HEAD_SHA" \
+                      -f state=success -f context="$context" \
+                      -f description="Source branch is $allowed" > /dev/null
+                    echo "PR #$PR comes from $allowed. OK."
+                    exit 0
+                  fi
 
-          gh api "repos/$GH_REPO/statuses/$HEAD_SHA" \
-            -f state=failure -f context="$context" \
-            -f description="Only $allowed can be merged into $BASE_REF" > /dev/null
+                  gh api "repos/$GH_REPO/statuses/$HEAD_SHA" \
+                    -f state=failure -f context="$context" \
+                    -f description="Only $allowed can be merged into $BASE_REF" > /dev/null
 
-          gh pr close "$PR" --comment "Closed automatically: only \`$allowed\` can be merged into \`$BASE_REF\`. Feature work goes into \`Development\` and is promoted through Staging to Production from there."
+                  gh pr close "$PR" --comment "Closed automatically: only \`$allowed\` can be merged into \`$BASE_REF\`. Feature work goes into \`Development\` and is promoted through Staging to Production from there."
 
-          echo "::error::PR #$PR targets $BASE_REF from '$HEAD_REF'. Only $allowed may be merged into $BASE_REF."
-          exit 1
+                  echo "::error::PR #$PR targets $BASE_REF from '$HEAD_REF'. Only $allowed may be merged into $BASE_REF."
+                  exit 1

@@ -1,0 +1,229 @@
+# If every test passes, the image is tagged "tested-<code hash>".
+# Requires: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, JWT_SECRET, DB_PASSWORD in GitHub secrets
+
+name: Deploy staging
+
+on:
+    workflow_call:
+        inputs:
+            ref:
+                description: Branch or commit to deploy
+                type: string
+                default: Staging
+        outputs:
+            app_url:
+                description: URL of the deployed staging app
+                value: ${{ jobs.deploy.outputs.app_url }}
+    workflow_dispatch:
+        inputs:
+            ref:
+                description: Branch or commit to deploy
+                type: string
+                default: Staging
+
+permissions:
+    contents: read
+
+# Two runs at once would delete each other's stack
+concurrency:
+    group: deploy-staging
+    cancel-in-progress: false
+
+env:
+    AWS_REGION: ap-southeast-2
+    STACK_NAME: social-lite-staging
+    IMAGE_REPOSITORY: social-lite-app
+    TEMPLATE: cloudformation/app-server.yaml
+
+jobs:
+    validate:
+        name: Check CloudFormation templates
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+              with:
+                  ref: ${{ inputs.ref }}
+
+            - name: Lint templates
+              run: pipx run cfn-lint cloudformation/*.yaml
+
+            - name: Check the server has a CPU alarm
+              run: |
+                  grep -q 'MetricName: CPUUtilization' "$TEMPLATE"
+
+    deploy:
+        name: Deploy and test staging
+        runs-on: ubuntu-latest
+        needs: validate
+        environment:
+            name: staging
+            url: ${{ steps.stack.outputs.app_url }}
+        outputs:
+            app_url: ${{ steps.stack.outputs.app_url }}
+        steps:
+            - uses: actions/checkout@v5
+              with:
+                  ref: ${{ inputs.ref }}
+
+            - name: Log in to AWS
+              uses: aws-actions/configure-aws-credentials@v5
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ env.AWS_REGION }}
+
+            - name: Log in to ECR
+              id: ecr
+              uses: aws-actions/amazon-ecr-login@v2
+
+            # ---- 1. Build the image ----
+            # The tag is the git tree hash
+            - name: Build and push image
+              id: image
+              env:
+                  REGISTRY: ${{ steps.ecr.outputs.registry }}
+              run: |
+                  set -euo pipefail
+                  TAG=$(git rev-parse --short=12 "HEAD^{tree}")
+                  IMAGE="$REGISTRY/$IMAGE_REPOSITORY:$TAG"
+
+                  if aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="$TAG" > /dev/null 2>&1; then
+                    echo "$IMAGE was already built. Reusing it."
+                  else
+                    docker build --build-arg APP_VERSION="$TAG" -t "$IMAGE" .
+                    docker push "$IMAGE"
+                  fi
+
+                  echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+                  echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+            # ---- 2. Replace the staging server ----
+            - name: Look up the default network and latest Amazon Linux image
+              id: network
+              run: |
+                  set -euo pipefail
+                  VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true \
+                    --query "Vpcs[0].VpcId" --output text)
+
+                  if [ "$VPC_ID" = "None" ]; then
+                    echo "::error::No default VPC in $AWS_REGION. Create one with: aws ec2 create-default-vpc --region $AWS_REGION"
+                    exit 1
+                  fi
+
+                  # Default subnets are public, which the app needs
+                  SUBNET_ID=$(aws ec2 describe-subnets \
+                    --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true \
+                    --query "sort_by(Subnets, &AvailabilityZone)[0].SubnetId" --output text)
+
+                  AMI_ID=$(aws ec2 describe-images --owners amazon \
+                    --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
+                    --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
+
+                  echo "Using VPC $VPC_ID, subnet $SUBNET_ID and image $AMI_ID"
+                  echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
+                  echo "subnet_id=$SUBNET_ID" >> "$GITHUB_OUTPUT"
+                  echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+
+            - name: Delete the old staging stack
+              run: |
+                  set -euo pipefail
+                  if aws cloudformation describe-stacks --stack-name "$STACK_NAME" > /dev/null 2>&1; then
+                    echo "Deleting $STACK_NAME..."
+                    aws cloudformation delete-stack --stack-name "$STACK_NAME"
+                    aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+                  else
+                    echo "No existing $STACK_NAME stack."
+                  fi
+
+            - name: Create the new staging stack with test data
+              env:
+                  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+                  JWT_SECRET: ${{ secrets.JWT_SECRET }}
+                  VPC_ID: ${{ steps.network.outputs.vpc_id }}
+                  SUBNET_ID: ${{ steps.network.outputs.subnet_id }}
+                  AMI_ID: ${{ steps.network.outputs.ami_id }}
+                  IMAGE_TAG: ${{ steps.image.outputs.tag }}
+              run: |
+                  aws cloudformation deploy \
+                    --stack-name "$STACK_NAME" \
+                    --template-file "$TEMPLATE" \
+                    --capabilities CAPABILITY_IAM \
+                    --parameter-overrides \
+                      VpcId="$VPC_ID" \
+                      SubnetId="$SUBNET_ID" \
+                      AmiId="$AMI_ID" \
+                      ImageRepository="$IMAGE_REPOSITORY" \
+                      ImageTag="$IMAGE_TAG" \
+                      DbPassword="$DB_PASSWORD" \
+                      JwtSecret="$JWT_SECRET" \
+                      SeedDatabase=true
+
+            - name: Show why the stack failed
+              if: failure()
+              run: |
+                  aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
+                    --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
+                    --output table || true
+
+            - name: Get the app URL
+              id: stack
+              run: |
+                  set -euo pipefail
+                  APP_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                    --query "Stacks[0].Outputs[?OutputKey=='AppURL'].OutputValue" --output text)
+
+                  echo "Staging is at $APP_URL"
+                  echo "app_url=$APP_URL" >> "$GITHUB_OUTPUT"
+
+            # ---- 3. Test the running app ----
+            # The stack is done once the server is running, but the server still has to install Docker and set up MySQL, so wait up to 10 minutes
+            - name: Wait for the app to start
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
+                  TAG: ${{ steps.image.outputs.tag }}
+              run: |
+                  for attempt in $(seq 1 40); do
+                    if curl --fail --silent "$APP_URL/api/health" | grep -q "\"version\":\"$TAG\""; then
+                      echo "Health check passed. Running version $TAG."
+                      exit 0
+                    fi
+
+                    echo "Attempt $attempt failed. Retrying in 15 seconds..."
+                    sleep 15
+                  done
+
+                  echo "Health check failed."
+                  exit 1
+
+            - name: Check the home page loads
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
+              run: |
+                  # Save the page first. Piping curl into grep -q can fail when grep exits early.
+                  PAGE=$(curl --fail --silent --show-error "$APP_URL/")
+                  echo "$PAGE" | grep -q '<title>SocialLite</title>'
+                  echo "Home page check passed."
+
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: "24"
+
+            - name: Run Playwright end-to-end tests
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
+              run: |
+                  npm init -y > /dev/null
+                  npm install --save-dev @playwright/test
+                  npx playwright install --with-deps chromium
+                  npx playwright test e2e/app.spec.js
+
+            # ---- 4. Mark the image as tested ----
+            # Adds a second tag to the same image. Nothing is rebuilt or copied.
+            - name: Tag the image as tested
+              env:
+                  IMAGE: ${{ steps.image.outputs.image }}
+                  REGISTRY: ${{ steps.ecr.outputs.registry }}
+                  TAG: ${{ steps.image.outputs.tag }}
+              run: |
+                  docker buildx imagetools create --tag "$REGISTRY/$IMAGE_REPOSITORY:tested-$TAG" "$IMAGE"
+                  echo "Tagged $IMAGE as tested-$TAG"
