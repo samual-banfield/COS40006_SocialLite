@@ -2,12 +2,35 @@ import { useEffect, useRef, useState } from "react";
 import "./Modal.css";
 import "./LoginModal.css";
 
-// login form shown over the top of the current page using a native <dialog>
-function LoginModal({ open, onClose, onLogin }) {
+// wording for each mode, the form itself is the same for both
+const MODES = {
+    login: {
+        title: "Log in",
+        sub: "Welcome back to Social Lite.",
+        submit: "Log in",
+        missing: "Enter your username and password to log in.",
+        switchPrompt: "Don't have an account?",
+        switchLabel: "Sign up",
+    },
+    signup: {
+        title: "Sign up",
+        sub: "Create your Social Lite account.",
+        submit: "Sign up",
+        missing: "Enter a username and password to sign up.",
+        switchPrompt: "Already have an account?",
+        switchLabel: "Log in",
+    },
+};
+
+// login/signup form shown over the top of the current page using a native <dialog>
+function LoginModal({ open, onClose, onLogin, onSignup }) {
     const dialogRef = useRef(null);
+    const [mode, setMode] = useState("login");
     const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
     const [error, setError] = useState("");
+
+    const text = MODES[mode];
 
     useEffect(() => {
         const dialog = dialogRef.current;
@@ -18,19 +41,27 @@ function LoginModal({ open, onClose, onLogin }) {
     async function handleSubmit(e) {
         e.preventDefault();
         if (!username.trim() || !password) {
-            setError("Enter your username and password to log in.");
+            setError(text.missing);
             return;
         }
+        const submit = mode === "signup" ? onSignup : onLogin;
         try {
-            await onLogin({ username: username.trim(), password });
+            await submit({ username: username.trim(), password });
         } catch (err) {
             setError(err.message);
         }
     }
 
+    // keep whatever was typed so switching after a mistake doesn't lose it
+    function switchMode() {
+        setMode(mode === "login" ? "signup" : "login");
+        setError("");
+    }
+
     // the modal stays mounted between opens, so clear the form whenever it closes
     // (submit, cancel, escape or backdrop click all end up here)
     function handleClose() {
+        setMode("login");
         setUsername("");
         setPassword("");
         setError("");
@@ -50,9 +81,9 @@ function LoginModal({ open, onClose, onLogin }) {
                 <div className="modal-head">
                     <div>
                         <h2 id="login-title" className="modal-title">
-                            Log in
+                            {text.title}
                         </h2>
-                        <p className="modal-sub">Welcome back to Social Lite.</p>
+                        <p className="modal-sub">{text.sub}</p>
                     </div>
                     <button
                         type="button"
@@ -93,7 +124,9 @@ function LoginModal({ open, onClose, onLogin }) {
                             type="password"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
-                            autoComplete="current-password"
+                            autoComplete={
+                                mode === "signup" ? "new-password" : "current-password"
+                            }
                         />
                     </div>
                     {error && (
@@ -102,9 +135,20 @@ function LoginModal({ open, onClose, onLogin }) {
                         </p>
                     )}
                     <button type="submit" className="btn btn-primary login-submit">
-                        Log in
+                        {text.submit}
                     </button>
                 </form>
+
+                <p className="login-switch">
+                    {text.switchPrompt}{" "}
+                    <button
+                        type="button"
+                        className="login-switch-btn"
+                        onClick={switchMode}
+                    >
+                        {text.switchLabel}
+                    </button>
+                </p>
             </div>
         </dialog>
     );
