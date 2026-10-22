@@ -101,18 +101,19 @@ jobs:
                     fi
                   fi
 
-                  # Default subnets are public, which the server needs
-                  SUBNET_ID=$(aws ec2 describe-subnets                     --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true                     --query "sort_by(Subnets, &AvailabilityZone)[0].SubnetId" --output text)
+                  # Default subnets are public, one in each availability zone. The load balancer,
+                  # servers and database all need at least two zones.
+                  SUBNET_IDS=$(aws ec2 describe-subnets \
+                    --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true \
+                    --query "Subnets[].SubnetId" --output text | tr '\t' ',')
 
-                  # The database needs subnets in at least two availability zones
-                  DB_SUBNET_IDS=$(aws ec2 describe-subnets                     --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true                     --query "Subnets[].SubnetId" --output text | tr '	' ',')
+                  AMI_ID=$(aws ec2 describe-images --owners amazon \
+                    --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
+                    --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
 
-                  AMI_ID=$(aws ec2 describe-images --owners amazon                     --filters "Name=name,Values=al2023-ami-2023.*-x86_64"                     --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
-
-                  echo "Using VPC $VPC_ID and database subnets $DB_SUBNET_IDS"
+                  echo "Using VPC $VPC_ID and subnets $SUBNET_IDS"
                   echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
-                  echo "subnet_id=$SUBNET_ID" >> "$GITHUB_OUTPUT"
-                  echo "db_subnet_ids=$DB_SUBNET_IDS" >> "$GITHUB_OUTPUT"
+                  echo "subnet_ids=$SUBNET_IDS" >> "$GITHUB_OUTPUT"
                   echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
 
             # Creates the bucket on the first run. Later runs leave it alone, and the
@@ -132,30 +133,55 @@ jobs:
                   echo "Production images are stored in $BUCKET"
                   echo "name=$BUCKET" >> "$GITHUB_OUTPUT"
 
-            # Runs once. Creating the database takes about 10 minutes. The server starts
+            # Runs once. Creating the database takes about 10 minutes. The servers start
             # the app once the image is tagged as production, in step 3.
+            # Production keeps 1 server, and adds a second in another zone when CPU is high.
             - name: Create the production stack
               if: steps.network.outputs.exists == 'false'
               env:
                   DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
                   JWT_SECRET: ${{ secrets.JWT_SECRET }}
                   VPC_ID: ${{ steps.network.outputs.vpc_id }}
-                  SUBNET_ID: ${{ steps.network.outputs.subnet_id }}
-                  DB_SUBNET_IDS: ${{ steps.network.outputs.db_subnet_ids }}
+                  SUBNET_IDS: ${{ steps.network.outputs.subnet_ids }}
                   AMI_ID: ${{ steps.network.outputs.ami_id }}
                   IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
               run: |
-                  aws cloudformation deploy                     --stack-name "$STACK_NAME"                     --template-file "$TEMPLATE"                     --capabilities CAPABILITY_IAM                     --parameter-overrides                       VpcId="$VPC_ID"                       SubnetId="$SUBNET_ID"                       DbSubnetIds="$DB_SUBNET_IDS"                       AmiId="$AMI_ID"                       ImageRepository="$IMAGE_REPOSITORY"                       ImageTag=production                       DbPassword="$DB_PASSWORD"                       JwtSecret="$JWT_SECRET"                       SeedDatabase=false                       ImageBucket="$IMAGE_BUCKET"
+                  aws cloudformation deploy \
+                    --stack-name "$STACK_NAME" \
+                    --template-file "$TEMPLATE" \
+                    --capabilities CAPABILITY_IAM \
+                    --parameter-overrides \
+                      VpcId="$VPC_ID" \
+                      SubnetIds="$SUBNET_IDS" \
+                      MinServers=1 \
+                      MaxServers=2 \
+                      AmiId="$AMI_ID" \
+                      ImageRepository="$IMAGE_REPOSITORY" \
+                      ImageTag=production \
+                      DbPassword="$DB_PASSWORD" \
+                      JwtSecret="$JWT_SECRET" \
+                      SeedDatabase=false \
+                      ImageBucket="$IMAGE_BUCKET"
 
-            # Only DbSubnetIds and ImageBucket are passed, so CloudFormation keeps the other values
-            # the stack was created with, including the server's image. Only template changes are applied.
+            # Only the subnets, server counts and ImageBucket are passed, so CloudFormation keeps the other
+            # values the stack was created with, including the servers' image. Only template changes are applied.
+            # Replacing the servers waits until every new one's app is healthy, then removes the old ones.
             - name: Apply template changes
               if: steps.network.outputs.exists == 'true'
               env:
-                  DB_SUBNET_IDS: ${{ steps.network.outputs.db_subnet_ids }}
+                  SUBNET_IDS: ${{ steps.network.outputs.subnet_ids }}
                   IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
               run: |
-                  aws cloudformation deploy                     --stack-name "$STACK_NAME"                     --template-file "$TEMPLATE"                     --capabilities CAPABILITY_IAM                     --no-fail-on-empty-changeset                     --parameter-overrides DbSubnetIds="$DB_SUBNET_IDS" ImageBucket="$IMAGE_BUCKET"
+                  aws cloudformation deploy \
+                    --stack-name "$STACK_NAME" \
+                    --template-file "$TEMPLATE" \
+                    --capabilities CAPABILITY_IAM \
+                    --no-fail-on-empty-changeset \
+                    --parameter-overrides \
+                      SubnetIds="$SUBNET_IDS" \
+                      MinServers=1 \
+                      MaxServers=2 \
+                      ImageBucket="$IMAGE_BUCKET"
 
             - name: Show why the stack failed
               if: failure()
@@ -188,7 +214,7 @@ jobs:
                   echo "Production is at $APP_URL"
                   echo "app_url=$APP_URL" >> "$GITHUB_OUTPUT"
 
-            # The server checks for the new image every minute, so wait up to 10 minutes
+            # Each server checks for the new image every minute, so wait up to 10 minutes
             - name: Wait for the new version to go live
               env:
                   APP_URL: ${{ steps.stack.outputs.app_url }}
