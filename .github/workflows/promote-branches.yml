@@ -65,7 +65,13 @@ jobs:
             - run: npm ci
             - run: npx prisma migrate deploy
             - run: npx prisma db seed
-            - run: npm test
+            # The error line shows up in the run summary, so you can see it was Jest without opening the logs
+            - name: Run Jest tests
+              run: |
+                  if ! npm test; then
+                    echo "::error title=Jest tests failed::One or more backend unit tests failed. Open the 'Run Jest tests' step to see which."
+                    exit 1
+                  fi
 
     promote-to-staging:
         name: Development → Staging (auto-merge)
