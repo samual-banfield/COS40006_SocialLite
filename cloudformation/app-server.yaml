@@ -5,7 +5,6 @@
 
 Parameters:
     # ---- Network and server ----
-
     VpcId:
         Type: AWS::EC2::VPC::Id
         Description: VPC to run the server and database in
@@ -26,7 +25,6 @@ Parameters:
         Description: Amazon Linux 2023 image for the server
 
     # ---- App image ----
-
     ImageRepository:
         Type: String
         Default: social-lite-app
@@ -37,7 +35,6 @@ Parameters:
         Description: Image tag the server runs
 
     # ---- Secrets and data ----
-
     # Letters and numbers only, as symbols break the database URL
     DbPassword:
         Type: String
@@ -60,6 +57,12 @@ Parameters:
         Default: "false"
         AllowedValues: ["true", "false"]
         Description: Reset the database and fill it with test data for every new version
+
+    # ---- Images ----
+    # Created by image-bucket.yaml, which the deploy workflows run before this stack
+    ImageBucket:
+        Type: String
+        Description: S3 bucket that stores the images attached to posts
 
 Conditions:
     # Staging's data is thrown away on every release, so it needs no backups or protection
@@ -98,7 +101,7 @@ Resources:
     # Policy changes are applied in place.
     # Recreated if: the role or profile is given a fixed name or path.
 
-    # Lets the server pull images from ECR, and nothing else
+    # Lets the server pull images from ECR and use its own image bucket, and nothing else
     InstanceRole:
         Type: AWS::IAM::Role
         Properties:
@@ -111,6 +114,22 @@ Resources:
                       Action: sts:AssumeRole
             ManagedPolicyArns:
                 - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+            Policies:
+                - PolicyName: ImageBucketAccess
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - s3:GetObject
+                                - s3:PutObject
+                                - s3:DeleteObject
+                            Resource: !Sub arn:${AWS::Partition}:s3:::${ImageBucket}/*
+                          # Without this, S3 answers "access denied" rather than "not found"
+                          # for a missing image. The staging seed also uses it to clear old uploads.
+                          - Effect: Allow
+                            Action: s3:ListBucket
+                            Resource: !Sub arn:${AWS::Partition}:s3:::${ImageBucket}
 
     InstanceProfile:
         Type: AWS::IAM::InstanceProfile
@@ -175,6 +194,11 @@ Resources:
         Type: AWS::EC2::LaunchTemplate
         Properties:
             LaunchTemplateData:
+                # The app reaches the server's IAM role through the instance metadata service.
+                # It runs in a Docker container, one network hop further away, so allow 2 hops.
+                MetadataOptions:
+                    HttpTokens: required
+                    HttpPutResponseHopLimit: 2
                 # Runs once, when the server first boots
                 UserData:
                     Fn::Base64: !Sub |
@@ -191,6 +215,8 @@ Resources:
                         cat > /etc/sociallite.env <<EOF
                         DATABASE_URL=mysql://sociallite:${DbPassword}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/sociallite?allowPublicKeyRetrieval=true
                         JWT_SECRET=${JwtSecret}
+                        IMAGE_BUCKET=${ImageBucket}
+                        AWS_REGION=${AWS::Region}
                         EOF
                         chmod 600 /etc/sociallite.env
 

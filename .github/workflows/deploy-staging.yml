@@ -32,8 +32,10 @@ concurrency:
 env:
     AWS_REGION: ap-southeast-2
     STACK_NAME: social-lite-staging
+    IMAGES_STACK_NAME: social-lite-staging-images
     IMAGE_REPOSITORY: social-lite-app
     TEMPLATE: cloudformation/app-server.yaml
+    IMAGES_TEMPLATE: cloudformation/image-bucket.yaml
 
 jobs:
     validate:
@@ -144,19 +146,38 @@ jobs:
                   docker buildx imagetools create --tag "$REGISTRY/$IMAGE_REPOSITORY:staging" "$IMAGE"
                   echo "Tagged $IMAGE as staging"
 
-            # A stack whose first create failed can't be updated, only deleted
-            - name: Remove a failed staging stack
+            # A stack whose first create failed can't be updated, only deleted.
+            # Deleting the image stack keeps the bucket, as it is set to Retain.
+            - name: Remove failed staging stacks
               run: |
                   set -euo pipefail
-                  STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
-                    --query "Stacks[0].StackStatus" --output text 2> /dev/null || echo NONE)
-                  echo "$STACK_NAME status: $STATUS"
+                  for STACK in "$IMAGES_STACK_NAME" "$STACK_NAME"; do
+                    STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+                      --query "Stacks[0].StackStatus" --output text 2> /dev/null || echo NONE)
+                    echo "$STACK status: $STATUS"
 
-                  if [ "$STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STATUS" = "ROLLBACK_FAILED" ] || [ "$STATUS" = "DELETE_FAILED" ]; then
-                    echo "Deleting $STACK_NAME so it can be created again..."
-                    aws cloudformation delete-stack --stack-name "$STACK_NAME"
-                    aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-                  fi
+                    if [ "$STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STATUS" = "ROLLBACK_FAILED" ] || [ "$STATUS" = "DELETE_FAILED" ]; then
+                      echo "Deleting $STACK so it can be created again..."
+                      aws cloudformation delete-stack --stack-name "$STACK"
+                      aws cloudformation wait stack-delete-complete --stack-name "$STACK"
+                    fi
+                  done
+
+            # Creates the bucket on the first run. Later runs leave it alone.
+            - name: Create or update the staging image bucket
+              id: bucket
+              run: |
+                  set -euo pipefail
+                  aws cloudformation deploy \
+                    --stack-name "$IMAGES_STACK_NAME" \
+                    --template-file "$IMAGES_TEMPLATE" \
+                    --no-fail-on-empty-changeset \
+                    --parameter-overrides Environment=staging
+
+                  BUCKET=$(aws cloudformation describe-stacks --stack-name "$IMAGES_STACK_NAME" \
+                    --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text)
+                  echo "Staging images are stored in $BUCKET"
+                  echo "name=$BUCKET" >> "$GITHUB_OUTPUT"
 
             # CloudFormation only changes what no longer matches the template. Creating the
             # stack, or replacing the database, takes about 10 extra minutes.
@@ -168,6 +189,7 @@ jobs:
                   SUBNET_ID: ${{ steps.network.outputs.subnet_id }}
                   DB_SUBNET_IDS: ${{ steps.network.outputs.db_subnet_ids }}
                   AMI_ID: ${{ steps.network.outputs.ami_id }}
+                  IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
               run: |
                   aws cloudformation deploy \
                     --stack-name "$STACK_NAME" \
@@ -183,14 +205,17 @@ jobs:
                       ImageTag=staging \
                       DbPassword="$DB_PASSWORD" \
                       JwtSecret="$JWT_SECRET" \
-                      SeedDatabase=true
+                      SeedDatabase=true \
+                      ImageBucket="$IMAGE_BUCKET"
 
             - name: Show why the stack failed
               if: failure()
               run: |
-                  aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
-                    --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
-                    --output table || true
+                  for STACK in "$IMAGES_STACK_NAME" "$STACK_NAME"; do
+                    aws cloudformation describe-stack-events --stack-name "$STACK" \
+                      --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
+                      --output table || true
+                  done
 
             - name: Get the app URL
               id: stack
