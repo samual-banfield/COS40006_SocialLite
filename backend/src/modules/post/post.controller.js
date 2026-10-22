@@ -17,6 +17,14 @@ exports.createPost = async (req, res) => {
     res.status(201).json(post);
 };
 
+exports.updatePost = async (req, res) => {
+    const { title, content } = req.body;
+    const post = await postService.updatePost(req.params.id, req.user.id, { title, content });
+    if (post === null) return notFound(res);
+    if (post === false) return res.status(403).json({ error: "you can only edit your own posts" });
+    res.json(post);
+};
+
 exports.likePost = async (req, res) => {
     if (!(await postService.likePost(req.params.id, req.user.id))) return notFound(res);
     await exports.getPost(req, res);

@@ -7,12 +7,14 @@ import {
     login,
     setToken,
     unlikePost,
+    updatePost,
 } from "./api.js";
 import Header from "./components/Header.jsx";
 import Feed from "./components/Feed.jsx";
 import PostView from "./components/PostView.jsx";
 import LoginModal from "./components/LoginModal.jsx";
 import ComposeModal from "./components/ComposeModal.jsx";
+import EditPostModal from "./components/EditPostModal.jsx";
 import "./App.css";
 
 function App() {
@@ -24,6 +26,7 @@ function App() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [openPostId, setOpenPostId] = useState(null);
+    const [editingPostId, setEditingPostId] = useState(null);
 
     // refetched on login/logout since likedByMe depends on who is asking
     useEffect(() => {
@@ -48,6 +51,7 @@ function App() {
     }, [openPostId]);
 
     const openPost = posts.find((p) => p.id === openPostId);
+    const editingPost = posts.find((p) => p.id === editingPostId);
 
     function replacePost(updated) {
         setPosts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
@@ -65,6 +69,7 @@ function App() {
         setToken(null);
         setUser(null);
         setComposeOpen(false);
+        setEditingPostId(null);
     }
 
     // errors are left to bubble up so the modal can show them
@@ -73,6 +78,13 @@ function App() {
         setPosts((prev) => [post, ...prev]);
         setComposeOpen(false);
         setOpenPostId(null);
+    }
+
+    // errors are left to bubble up so the modal can show them
+    async function handleEditPost({ title, content }) {
+        const updated = await updatePost(editingPostId, { title, content });
+        replacePost(updated);
+        setEditingPostId(null);
     }
 
     async function handleToggleLike(post) {
@@ -104,6 +116,9 @@ function App() {
                         user={user}
                         onBack={() => setOpenPostId(null)}
                         onToggleLike={handleToggleLike}
+                        onEdit={
+                            user ? () => setEditingPostId(openPost.id) : undefined
+                        }
                     />
                 ) : (
                     <Feed
@@ -116,6 +131,7 @@ function App() {
                             setOpenPostId(id);
                         }}
                         onToggleLike={handleToggleLike}
+                        onEditPost={setEditingPostId}
                     />
                 )}
             </main>
@@ -132,6 +148,15 @@ function App() {
                 onClose={() => setComposeOpen(false)}
                 onSubmit={handleNewPost}
             />
+
+            {editingPost && user && (
+                <EditPostModal
+                    key={editingPost.id}
+                    post={editingPost}
+                    onClose={() => setEditingPostId(null)}
+                    onSubmit={handleEditPost}
+                />
+            )}
         </>
     );
 }

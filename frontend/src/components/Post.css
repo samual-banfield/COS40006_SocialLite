@@ -1,3 +1,7 @@
+.post-card {
+    position: relative;
+}
+
 .post {
     display: flex;
     flex-direction: column;
