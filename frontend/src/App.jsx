@@ -6,6 +6,7 @@ import {
     likePost,
     login,
     setToken,
+    signup,
     unlikePost,
 } from "./api.js";
 import Header from "./components/Header.jsx";
@@ -59,6 +60,12 @@ function App() {
         setToken(token);
         setUser(user);
         setLoginOpen(false);
+    }
+
+    // create the account, then log in with the same details so the modal closes logged in
+    async function handleSignup({ username, password }) {
+        await signup({ username, password });
+        await handleLogin({ username, password });
     }
 
     function handleLogout() {
@@ -122,6 +129,7 @@ function App() {
                 open={loginOpen}
                 onClose={() => setLoginOpen(false)}
                 onLogin={handleLogin}
+                onSignup={handleSignup}
             />
 
             <ComposeModal

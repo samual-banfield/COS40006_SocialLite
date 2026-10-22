@@ -2,6 +2,12 @@ const request = require("supertest");
 const app = require("../src/app");
 const prisma = require("../src/db");
 const { AuthResponse, Error } = require("../src/schemas");
+const {
+    bearer,
+    validToken,
+    expiredToken,
+    malformedHeaders,
+} = require("./helpers");
 
 const created = [];
 const uniqueUsername = () => {
@@ -71,6 +77,53 @@ describe("POST /api/auth/signup", () => {
             expect(res.status).toBe(409);
             Error.parse(res.body);
         });
+    });
+
+    describe("while logged in", () => {
+        it("returns 403 and doesn't create the user", async () => {
+            const username = uniqueUsername();
+            const res = await request(app)
+                .post("/api/auth/signup")
+                .set("Authorization", bearer(validToken()))
+                .send({ username, password: "password" });
+            expect(res.status).toBe(403);
+            expect(Error.parse(res.body).error).toBe("you are already logged in");
+            const user = await prisma.user.findUnique({ where: { username } });
+            expect(user).toBeNull();
+        });
+
+        it("returns 403 using the token from a fresh signup", async () => {
+            const first = await request(app)
+                .post("/api/auth/signup")
+                .send({ username: uniqueUsername(), password: "password" });
+            const res = await request(app)
+                .post("/api/auth/signup")
+                .set("Authorization", bearer(first.body.token))
+                .send({ username: uniqueUsername(), password: "password" });
+            expect(res.status).toBe(403);
+            Error.parse(res.body);
+        });
+
+        it("allows signup with an expired token", async () => {
+            const res = await request(app)
+                .post("/api/auth/signup")
+                .set("Authorization", bearer(expiredToken()))
+                .send({ username: uniqueUsername(), password: "password" });
+            expect(res.status).toBe(201);
+            AuthResponse.parse(res.body);
+        });
+
+        it.each(malformedHeaders())(
+            "allows signup with %s",
+            async (_, header) => {
+                const res = await request(app)
+                    .post("/api/auth/signup")
+                    .set("Authorization", header)
+                    .send({ username: uniqueUsername(), password: "password" });
+                expect(res.status).toBe(201);
+                AuthResponse.parse(res.body);
+            },
+        );
     });
 
     describe("bad body", () => {
