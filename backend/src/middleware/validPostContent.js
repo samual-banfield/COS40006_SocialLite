@@ -1,6 +1,6 @@
 const { CreatePostBody } = require("../schemas");
 
-// checking that the title and content are non-whitespace strings within the limits, see schemas.js
+// checking that the title is a non-whitespace string and the content (optional) is a string, both within the limits, see schemas.js
 const validPostContent = function (req, res, next) {
     const result = CreatePostBody.safeParse(req.body ?? {});
     if (!result.success) {

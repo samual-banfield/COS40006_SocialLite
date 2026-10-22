@@ -121,6 +121,28 @@ describe("POST /api/post", () => {
             expect(post).toMatchObject(body);
         });
 
+        it("accepts a post with no content", async () => {
+            const res = await request(app)
+                .post("/api/post")
+                .set("Authorization", auth())
+                .send({ title: "Jest post" });
+            expect(res.status).toBe(201);
+            const post = Post.parse(res.body);
+            createdIds.push(post.id);
+            expect(post).toMatchObject({ title: "Jest post", content: "" });
+        });
+
+        it("stores whitespace only content as empty", async () => {
+            const res = await request(app)
+                .post("/api/post")
+                .set("Authorization", auth())
+                .send({ title: "Jest post", content: "\n\t " });
+            expect(res.status).toBe(201);
+            const post = Post.parse(res.body);
+            createdIds.push(post.id);
+            expect(post.content).toBe("");
+        });
+
         it("shows up when fetched afterwards", async () => {
             const created = await request(app)
                 .post("/api/post")
@@ -173,9 +195,7 @@ describe("POST /api/post", () => {
         it.each([
             ["an empty body", {}],
             ["a missing title", { content: "content" }],
-            ["a missing content", { title: "title" }],
             ["a whitespace title", { title: "   ", content: "content" }],
-            ["a whitespace content", { title: "title", content: "\n\t " }],
             ["a non-string title", { title: 123, content: "content" }],
             ["a non-string content", { title: "title", content: ["content"] }],
             ["a null title", { title: null, content: "content" }],
@@ -263,6 +283,12 @@ describe("PATCH /api/post/:id", () => {
             expect(Post.parse(res.body)).toMatchObject(limits);
         });
 
+        it("clears the content when it is left empty", async () => {
+            const res = await send(id, auth(), { title: "Edited post", content: "" });
+            expect(res.status).toBe(200);
+            expect(Post.parse(res.body)).toMatchObject({ title: "Edited post", content: "" });
+        });
+
         it("returns 404 for a post that doesn't exist", async () => {
             const res = await send(999999, auth());
             expect(res.status).toBe(404);
@@ -312,9 +338,7 @@ describe("PATCH /api/post/:id", () => {
         it.each([
             ["an empty body", {}],
             ["a missing title", { content: "content" }],
-            ["a missing content", { title: "title" }],
             ["a whitespace title", { title: "   ", content: "content" }],
-            ["a whitespace content", { title: "title", content: "\n\t " }],
             ["a non-string title", { title: 123, content: "content" }],
             ["a non-string content", { title: "title", content: ["content"] }],
             ["a null title", { title: null, content: "content" }],

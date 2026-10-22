@@ -26,7 +26,7 @@ function ComposeModal({ open, user, onClose, onSubmit }) {
         if (!open && dialog.open) dialog.close();
     }, [open]);
 
-    const canPost = title.trim() !== "" && content.trim() !== "" && !submitting;
+    const canPost = title.trim() !== "" && !submitting;
 
     // the server checks these too, this just saves uploading a file it would reject
     function handleFile(e) {

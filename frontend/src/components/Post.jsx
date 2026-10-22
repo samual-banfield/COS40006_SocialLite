@@ -49,7 +49,7 @@ function Post({ post, user, onOpen, onToggleLike }) {
                 {post.image && (
                     <img className="post-image" src={post.image} alt="" />
                 )}
-                <span className="post-excerpt">{excerpt}</span>
+                {excerpt && <span className="post-excerpt">{excerpt}</span>}
                 {isLong && (
                     <span className="post-more">
                         Read the full post
