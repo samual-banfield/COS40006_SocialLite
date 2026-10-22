@@ -1,4 +1,5 @@
-# Requires: AWS_ACCESS_KEY_ID & AWS_SECRET_ACCESS_KEY in GitHub secrets
+# Requires: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, JWT_SECRET, DB_PASSWORD in GitHub secrets
+# The first run creates the production stack. Later runs update it in place.
 name: Deploy production
 
 on:
@@ -48,13 +49,6 @@ jobs:
               id: ecr
               uses: aws-actions/amazon-ecr-login@v2
 
-            - name: Stop if production hasn't been created
-              run: |
-                  if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" > /dev/null 2>&1; then
-                    echo "::error::$STACK_NAME doesn't exist. Run Create production (run once) first."
-                    exit 1
-                  fi
-
             # ---- 1. Find the tested image ----
             - name: Find the image staging tested
               id: image
@@ -70,16 +64,62 @@ jobs:
                   echo "Releasing version $VERSION"
                   echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-            # ---- 2. Update the infrastructure ----
-            # Parameters aren't passed, so CloudFormation keeps the values the stack was
-            # created with. Only changes to the template itself are applied.
-            - name: Apply template changes
+            # ---- 2. Create or update the infrastructure ----
+            - name: Look up the network
+              id: network
               run: |
-                  aws cloudformation deploy \
-                    --stack-name "$STACK_NAME" \
-                    --template-file "$TEMPLATE" \
-                    --capabilities CAPABILITY_IAM \
-                    --no-fail-on-empty-changeset
+                  set -euo pipefail
+                  if aws cloudformation describe-stacks --stack-name "$STACK_NAME" > /dev/null 2>&1; then
+                    echo "exists=true" >> "$GITHUB_OUTPUT"
+                    # Stay in the VPC the stack was created in
+                    VPC_ID=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME"                       --query "Stacks[0].Parameters[?ParameterKey=='VpcId'].ParameterValue" --output text)
+                  else
+                    echo "exists=false" >> "$GITHUB_OUTPUT"
+                    echo "$STACK_NAME doesn't exist yet, so it will be created."
+                    VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true                       --query "Vpcs[0].VpcId" --output text)
+
+                    if [ "$VPC_ID" = "None" ]; then
+                      echo "::error::No default VPC in $AWS_REGION. Create one with: aws ec2 create-default-vpc --region $AWS_REGION"
+                      exit 1
+                    fi
+                  fi
+
+                  # Default subnets are public, which the server needs
+                  SUBNET_ID=$(aws ec2 describe-subnets                     --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true                     --query "sort_by(Subnets, &AvailabilityZone)[0].SubnetId" --output text)
+
+                  # The database needs subnets in at least two availability zones
+                  DB_SUBNET_IDS=$(aws ec2 describe-subnets                     --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true                     --query "Subnets[].SubnetId" --output text | tr '	' ',')
+
+                  AMI_ID=$(aws ec2 describe-images --owners amazon                     --filters "Name=name,Values=al2023-ami-2023.*-x86_64"                     --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
+
+                  echo "Using VPC $VPC_ID and database subnets $DB_SUBNET_IDS"
+                  echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
+                  echo "subnet_id=$SUBNET_ID" >> "$GITHUB_OUTPUT"
+                  echo "db_subnet_ids=$DB_SUBNET_IDS" >> "$GITHUB_OUTPUT"
+                  echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+
+            # Runs once. Creating the database takes about 10 minutes. The server starts
+            # the app once the image is tagged as production, in step 3.
+            - name: Create the production stack
+              if: steps.network.outputs.exists == 'false'
+              env:
+                  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+                  JWT_SECRET: ${{ secrets.JWT_SECRET }}
+                  VPC_ID: ${{ steps.network.outputs.vpc_id }}
+                  SUBNET_ID: ${{ steps.network.outputs.subnet_id }}
+                  DB_SUBNET_IDS: ${{ steps.network.outputs.db_subnet_ids }}
+                  AMI_ID: ${{ steps.network.outputs.ami_id }}
+              run: |
+                  aws cloudformation deploy                     --stack-name "$STACK_NAME"                     --template-file "$TEMPLATE"                     --capabilities CAPABILITY_IAM                     --parameter-overrides                       VpcId="$VPC_ID"                       SubnetId="$SUBNET_ID"                       DbSubnetIds="$DB_SUBNET_IDS"                       AmiId="$AMI_ID"                       ImageRepository="$IMAGE_REPOSITORY"                       ImageTag=production                       DbPassword="$DB_PASSWORD"                       JwtSecret="$JWT_SECRET"                       SeedDatabase=false
+
+            # Only DbSubnetIds is passed, so CloudFormation keeps the other values the stack
+            # was created with, including the server's image. Only template changes are applied.
+            - name: Apply template changes
+              if: steps.network.outputs.exists == 'true'
+              env:
+                  DB_SUBNET_IDS: ${{ steps.network.outputs.db_subnet_ids }}
+              run: |
+                  aws cloudformation deploy                     --stack-name "$STACK_NAME"                     --template-file "$TEMPLATE"                     --capabilities CAPABILITY_IAM                     --no-fail-on-empty-changeset                     --parameter-overrides DbSubnetIds="$DB_SUBNET_IDS"
 
             - name: Show why the stack failed
               if: failure()
