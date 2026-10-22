@@ -36,6 +36,8 @@ env:
     IMAGE_REPOSITORY: social-lite-app
     TEMPLATE: cloudformation/app-server.yaml
     IMAGES_TEMPLATE: cloudformation/image-bucket.yaml
+    LOAD_TESTER_STACK_NAME: social-lite-staging-load-tester
+    LOAD_TESTER_TEMPLATE: cloudformation/load-tester.yaml
 
 jobs:
     validate:
@@ -145,10 +147,11 @@ jobs:
 
             # A stack whose first create failed can't be updated, only deleted.
             # Deleting the image stack keeps the bucket, as it is set to Retain.
+            # The load tester is deleted after every run, but a cancelled run can leave a failed one.
             - name: Remove failed staging stacks
               run: |
                   set -euo pipefail
-                  for STACK in "$IMAGES_STACK_NAME" "$STACK_NAME"; do
+                  for STACK in "$IMAGES_STACK_NAME" "$STACK_NAME" "$LOAD_TESTER_STACK_NAME"; do
                     STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
                       --query "Stacks[0].StackStatus" --output text 2> /dev/null || echo NONE)
                     echo "$STACK status: $STATUS"
@@ -216,15 +219,21 @@ jobs:
                       --output table || true
                   done
 
+            # The other outputs are used to look up metrics after the load test
             - name: Get the app URL
               id: stack
               run: |
                   set -euo pipefail
-                  APP_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
-                    --query "Stacks[0].Outputs[?OutputKey=='AppURL'].OutputValue" --output text)
+                  OUTPUTS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+                    --query "Stacks[0].Outputs" --output json)
+                  output() { echo "$OUTPUTS" | jq -r --arg key "$1" '.[] | select(.OutputKey == $key) | .OutputValue'; }
 
+                  APP_URL=$(output AppURL)
                   echo "Staging is at $APP_URL"
                   echo "app_url=$APP_URL" >> "$GITHUB_OUTPUT"
+                  echo "server_group=$(output ServerGroupName)" >> "$GITHUB_OUTPUT"
+                  echo "load_balancer=$(output LoadBalancerFullName)" >> "$GITHUB_OUTPUT"
+                  echo "database_id=$(output DatabaseId)" >> "$GITHUB_OUTPUT"
 
             # ---- 3. Test the running app ----
             # The stack can finish before the app is running. A new server still has to install Docker, and every new image resets and seeds the database, so wait up to 10 minutes
@@ -271,7 +280,120 @@ jobs:
                     exit 1
                   fi
 
-            # ---- 4. Check CloudWatch ----
+            # ---- 4. Load test ----
+            # A short lived server in the same region runs loadtest/social-lite.js: 50 users signing up,
+            # reading the feed, opening posts and images, liking, and posting for 2 minutes.
+            - name: Create the load tester
+              id: load_tester
+              env:
+                  VPC_ID: ${{ steps.network.outputs.vpc_id }}
+                  SUBNET_IDS: ${{ steps.network.outputs.subnet_ids }}
+                  AMI_ID: ${{ steps.network.outputs.ami_id }}
+              run: |
+                  set -euo pipefail
+                  # Any one public subnet will do
+                  if ! aws cloudformation deploy \
+                    --stack-name "$LOAD_TESTER_STACK_NAME" \
+                    --template-file "$LOAD_TESTER_TEMPLATE" \
+                    --capabilities CAPABILITY_IAM \
+                    --no-fail-on-empty-changeset \
+                    --parameter-overrides VpcId="$VPC_ID" SubnetId="${SUBNET_IDS%%,*}" AmiId="$AMI_ID"; then
+                    aws cloudformation describe-stack-events --stack-name "$LOAD_TESTER_STACK_NAME" \
+                      --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
+                      --output table || true
+                    exit 1
+                  fi
+
+                  INSTANCE_ID=$(aws cloudformation describe-stacks --stack-name "$LOAD_TESTER_STACK_NAME" \
+                    --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
+
+                  # The SSM agent connects shortly after the server boots. Wait up to 5 minutes.
+                  for attempt in $(seq 1 30); do
+                    PING=$(aws ssm describe-instance-information --filters Key=InstanceIds,Values="$INSTANCE_ID" \
+                      --query "InstanceInformationList[0].PingStatus" --output text)
+                    if [ "$PING" = "Online" ]; then
+                      echo "Load tester $INSTANCE_ID is ready."
+                      echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+                      exit 0
+                    fi
+                    echo "Waiting for $INSTANCE_ID to connect to SSM..."
+                    sleep 10
+                  done
+
+                  echo "::error title=Load tester not reachable::$INSTANCE_ID never connected to SSM, so the load test can't be sent to it."
+                  exit 1
+
+            # The script is sent inside the command, so the load tester needs no access to the repository.
+            # SSM keeps the first 24,000 characters of output, and k6's summary is well under that.
+            # k6 exits with 99 when one of the script's thresholds is missed.
+            - name: Run the k6 load test
+              id: load_test
+              env:
+                  APP_URL: ${{ steps.stack.outputs.app_url }}
+                  INSTANCE_ID: ${{ steps.load_tester.outputs.instance_id }}
+              run: |
+                  set -euo pipefail
+                  jq -n --arg script "$(base64 -w0 loadtest/social-lite.js)" --arg url "$APP_URL" '{
+                    commands: [
+                      "echo \($script) | base64 -d > /tmp/social-lite.js",
+                      "/usr/local/bin/k6 run --quiet --no-color -e APP_URL=\($url) /tmp/social-lite.js"
+                    ],
+                    executionTimeout: ["600"]
+                  }' > ssm-parameters.json
+
+                  echo "start=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+                  COMMAND_ID=$(aws ssm send-command \
+                    --instance-ids "$INSTANCE_ID" \
+                    --document-name AWS-RunShellScript \
+                    --comment "Social Lite k6 load test" \
+                    --parameters file://ssm-parameters.json \
+                    --query "Command.CommandId" --output text)
+                  echo "Sent the load test to $INSTANCE_ID as command $COMMAND_ID"
+
+                  # The test takes 2 minutes. Check every 15 seconds, for up to 10.
+                  for attempt in $(seq 1 40); do
+                    sleep 15
+                    STATUS=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+                      --query "Status" --output text 2> /dev/null || echo Pending)
+                    case "$STATUS" in
+                      Pending|InProgress|Delayed) echo "Load test is $STATUS..." ;;
+                      *) break ;;
+                    esac
+                  done
+                  echo "end=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+                  RESULT=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --output json)
+                  OUTPUT=$(echo "$RESULT" | jq -r '.StandardOutputContent')
+                  echo "$OUTPUT"
+                  echo "$RESULT" | jq -r '.StandardErrorContent'
+                  {
+                    echo "## k6 load test"
+                    echo '```'
+                    echo "$OUTPUT"
+                    echo '```'
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+                  CODE=$(echo "$RESULT" | jq -r '.ResponseCode')
+                  if [ "$STATUS" = "Success" ]; then
+                    echo "Load test passed."
+                  elif [ "$CODE" = "99" ]; then
+                    echo "::error title=Load test thresholds missed::Staging was too slow or returned too many errors under 50 users. The k6 summary marks each missed threshold with ✗."
+                    exit 1
+                  else
+                    echo "::error title=Load test didn't finish::The load test ended as $STATUS with exit code $CODE. Its output is above."
+                    exit 1
+                  fi
+
+            # Runs even if the load test failed, so the server is never left running
+            - name: Remove the load tester
+              if: always() && steps.load_tester.outcome != 'skipped'
+              run: |
+                  aws cloudformation delete-stack --stack-name "$LOAD_TESTER_STACK_NAME"
+                  aws cloudformation wait stack-delete-complete --stack-name "$LOAD_TESTER_STACK_NAME"
+                  echo "Deleted $LOAD_TESTER_STACK_NAME."
+
+            # ---- 5. Check CloudWatch ----
+            # The load test can set off the response time and server error alarms, which should fail staging.
             # The health check alarm needs 3 minutes of reports from the new version, so wait 4.
             # CloudFormation starts every alarm's name with the stack name. The scaling policy's own
             # alarms start with TargetTracking- instead, so they are left out, as one of them is in
@@ -292,7 +414,121 @@ jobs:
                   fi
                   echo "No CloudWatch alarms are firing."
 
-            # ---- 5. Mark the image as tested ----
+            # The alarms look at 5 to 10 minute windows, so a 2 minute test rarely sets them off. This
+            # checks the servers, database and S3 minute by minute while the load test ran. It also runs
+            # when the load test or alarm check failed, to help show why.
+            - name: Check performance during the load test
+              if: ${{ !cancelled() && steps.load_test.outputs.end != '' }}
+              env:
+                  START: ${{ steps.load_test.outputs.start }}
+                  END: ${{ steps.load_test.outputs.end }}
+                  SERVER_GROUP: ${{ steps.stack.outputs.server_group }}
+                  LOAD_BALANCER: ${{ steps.stack.outputs.load_balancer }}
+                  DATABASE_ID: ${{ steps.stack.outputs.database_id }}
+                  BUCKET: ${{ steps.bucket.outputs.name }}
+                  # Staging fails if any of these is passed in any minute of the test
+                  MAX_SERVER_CPU: 80
+                  MAX_SERVER_MEMORY: 90
+                  MAX_DB_CPU: 80
+                  MAX_DB_CONNECTIONS: 50
+                  MAX_S3_ERRORS: 0
+              run: |
+                  set -euo pipefail
+                  # S3 request metrics take a few minutes to arrive, so wait until 4 minutes after the test.
+                  # After the alarm check this is already the case.
+                  WAIT=$(( $(date -d "$END" +%s) + 240 - $(date +%s) ))
+                  if [ "$WAIT" -gt 0 ]; then
+                    echo "Waiting $WAIT seconds for the load test's metrics to arrive..."
+                    sleep "$WAIT"
+                  fi
+
+                  jq -n --arg group "$SERVER_GROUP" --arg stack "$STACK_NAME" --arg lb "$LOAD_BALANCER" \
+                    --arg db "$DATABASE_ID" --arg bucket "$BUCKET" '
+                    def query(id; namespace; name; stat; dimensions): {
+                      Id: id,
+                      MetricStat: {
+                        Metric: { Namespace: namespace, MetricName: name, Dimensions: dimensions },
+                        Period: 60,
+                        Stat: stat
+                      }
+                    };
+                    [{ Name: "AutoScalingGroupName", Value: $group }] as $servers
+                    | [{ Name: "Stack", Value: $stack }] as $health
+                    | [{ Name: "LoadBalancer", Value: $lb }] as $alb
+                    | [{ Name: "DBInstanceIdentifier", Value: $db }] as $rds
+                    | [{ Name: "BucketName", Value: $bucket }, { Name: "FilterId", Value: "EntireBucket" }] as $s3
+                    | [
+                        query("server_cpu"; "AWS/EC2"; "CPUUtilization"; "Average"; $servers),
+                        query("server_memory"; "SocialLite"; "MemoryUsedPercent"; "Maximum"; $health),
+                        query("requests"; "AWS/ApplicationELB"; "RequestCount"; "Sum"; $alb),
+                        query("response_p95"; "AWS/ApplicationELB"; "TargetResponseTime"; "p95"; $alb),
+                        query("server_errors"; "AWS/ApplicationELB"; "HTTPCode_Target_5XX_Count"; "Sum"; $alb),
+                        query("db_cpu"; "AWS/RDS"; "CPUUtilization"; "Maximum"; $rds),
+                        query("db_connections"; "AWS/RDS"; "DatabaseConnections"; "Maximum"; $rds),
+                        query("s3_requests"; "AWS/S3"; "AllRequests"; "Sum"; $s3),
+                        query("s3_errors"; "AWS/S3"; "5xxErrors"; "Sum"; $s3),
+                        query("s3_latency"; "AWS/S3"; "FirstByteLatency"; "Average"; $s3)
+                      ]' > metric-queries.json
+
+                  # From the start of the test's first minute to the end of its last
+                  RESULTS=$(aws cloudwatch get-metric-data \
+                    --metric-data-queries file://metric-queries.json \
+                    --start-time "$(date -u -d "$START" +%Y-%m-%dT%H:%M:00Z)" \
+                    --end-time "$(date -u -d "@$(( $(date -d "$END" +%s) + 60 ))" +%Y-%m-%dT%H:%M:00Z)" \
+                    --output json)
+
+                  # The highest minute, the total across all minutes with "total", or with "errors" the
+                  # total where no data means 0, as error counts are only sent when there are errors
+                  value() {
+                    echo "$RESULTS" | jq -r --arg id "$1" --arg how "${2:-highest}" '
+                      .MetricDataResults[] | select(.Id == $id) | .Values
+                      | if $how == "errors" then add // 0
+                        elif length == 0 then "no data"
+                        elif $how == "total" then add
+                        else max end
+                      | if type == "number" then (. * 100 | round / 100) else . end'
+                  }
+
+                  FAILED=0
+                  ROWS=""
+                  # row <label> <value> <unit> [limit]. Values over the limit fail staging.
+                  row() {
+                    local result="-"
+                    if [ -n "${4:-}" ]; then
+                      if [ "$2" = "no data" ]; then
+                        result="⚠️ no data"
+                      elif awk -v value="$2" -v limit="$4" 'BEGIN { exit !(value > limit) }'; then
+                        result="❌ over $4"
+                        FAILED=1
+                      else
+                        result="✅ within $4"
+                      fi
+                    fi
+                    ROWS+="| $1 | $2 $3 | $result |"$'\n'
+                  }
+
+                  row "Server CPU, highest minute" "$(value server_cpu)" "%" "$MAX_SERVER_CPU"
+                  row "Server memory, highest" "$(value server_memory)" "%" "$MAX_SERVER_MEMORY"
+                  row "Requests to the load balancer" "$(value requests total)" ""
+                  row "Response time p95, slowest minute" "$(value response_p95)" "s"
+                  row "Server errors (5xx)" "$(value server_errors errors)" ""
+                  row "Database CPU, highest" "$(value db_cpu)" "%" "$MAX_DB_CPU"
+                  row "Database connections, highest" "$(value db_connections)" "" "$MAX_DB_CONNECTIONS"
+                  row "S3 requests" "$(value s3_requests total)" ""
+                  row "S3 server errors (5xx)" "$(value s3_errors errors)" "" "$MAX_S3_ERRORS"
+                  row "S3 first byte latency, slowest minute" "$(value s3_latency)" "ms"
+
+                  TABLE="| Metric ($START to $END) | Value | Result |"$'\n'"| --- | --- | --- |"$'\n'"$ROWS"
+                  echo "$TABLE"
+                  { echo "## Performance during the load test"; echo; echo "$TABLE"; } >> "$GITHUB_STEP_SUMMARY"
+
+                  if [ "$FAILED" -eq 1 ]; then
+                    echo "::error title=Performance limits passed::Staging went over a limit during the load test. See the table above or the run summary."
+                    exit 1
+                  fi
+                  echo "Staging stayed within its limits during the load test."
+
+            # ---- 6. Mark the image as tested ----
             # Adds a second tag to the same image. Nothing is rebuilt or copied.
             - name: Tag the image as tested
               env:

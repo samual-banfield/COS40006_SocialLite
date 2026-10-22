@@ -1,0 +1,93 @@
+# Staging only. deploy-staging.yml creates this stack as social-lite-staging-load-tester once
+# staging passes its end-to-end tests, runs loadtest then deletes the stack
+
+Parameters:
+    VpcId:
+        Type: AWS::EC2::VPC::Id
+        Description: VPC to run the load tester in
+
+    # A public subnet, so the server can download k6 and reach SSM without a NAT gateway
+    SubnetId:
+        Type: AWS::EC2::Subnet::Id
+        Description: Public subnet for the load tester
+
+    AmiId:
+        Type: AWS::EC2::Image::Id
+        Description: Amazon Linux 2023 image for the load tester
+
+    K6Version:
+        Type: String
+        Default: v2.3.0
+        Description: k6 release to install, from github.com/grafana/k6/releases
+
+Resources:
+    # No inbound rules. Commands arrive through SSM, which the server connects out to.
+    SecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Social Lite load tester, no inbound traffic
+            VpcId: !Ref VpcId
+
+    # Lets SSM Run Command send the test to the server, and nothing else
+    InstanceRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service: ec2.amazonaws.com
+                      Action: sts:AssumeRole
+            ManagedPolicyArns:
+                - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+    InstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Roles:
+                - !Ref InstanceRole
+
+    # The stack is only finished once k6 is installed
+    Server:
+        Type: AWS::EC2::Instance
+        CreationPolicy:
+            ResourceSignal:
+                Timeout: PT10M
+        Properties:
+            ImageId: !Ref AmiId
+            # 50 virtual users need little CPU, but a bigger server keeps the tester from being
+            # the bottleneck. It only runs for a few minutes.
+            InstanceType: t3.small
+            IamInstanceProfile: !Ref InstanceProfile
+            NetworkInterfaces:
+                - AssociatePublicIpAddress: true
+                  DeviceIndex: "0"
+                  SubnetId: !Ref SubnetId
+                  GroupSet:
+                      - !Ref SecurityGroup
+            MetadataOptions:
+                HttpTokens: required
+            # Shown in the EC2 console's Name column
+            Tags:
+                - Key: Name
+                  Value: !Ref AWS::StackName
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    set -eu
+                    trap '/opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource Server --region ${AWS::Region} || true' ERR
+
+                    # Install k6 from its GitHub release. The SSM agent comes with Amazon Linux.
+                    dnf install -y aws-cfn-bootstrap tar
+                    curl --fail --silent --show-error --location \
+                      https://github.com/grafana/k6/releases/download/${K6Version}/k6-${K6Version}-linux-amd64.tar.gz |
+                      tar -xz --strip-components=1 -C /usr/local/bin k6-${K6Version}-linux-amd64/k6
+                    /usr/local/bin/k6 version
+
+                    /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource Server --region ${AWS::Region}
+
+Outputs:
+    InstanceId:
+        Description: Load tester server, the target for SSM Run Command
+        Value: !Ref Server

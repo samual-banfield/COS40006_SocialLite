@@ -233,6 +233,10 @@ Resources:
                 InstanceType: t3.micro
                 IamInstanceProfile:
                     Arn: !GetAtt InstanceProfile.Arn
+                # Sends CPU and network to CloudWatch every minute instead of every 5, so the
+                # staging load test can measure a 2 minute run and scaling reacts sooner
+                Monitoring:
+                    Enabled: true
                 # A public IP lets the server reach ECR, S3 and CloudWatch without a NAT gateway.
                 # The firewall still only lets the load balancer in.
                 NetworkInterfaces:
@@ -682,3 +686,16 @@ Outputs:
     DatabaseEndpoint:
         Description: Database address, only reachable from the servers
         Value: !GetAtt Database.Endpoint.Address
+
+    # Used by the staging load test to look up the servers', load balancer's and database's metrics
+    ServerGroupName:
+        Description: Auto Scaling group the servers run in
+        Value: !Ref ServerGroup
+
+    LoadBalancerFullName:
+        Description: Load balancer name as CloudWatch metrics use it
+        Value: !GetAtt LoadBalancer.LoadBalancerFullName
+
+    DatabaseId:
+        Description: RDS instance identifier
+        Value: !Ref Database
