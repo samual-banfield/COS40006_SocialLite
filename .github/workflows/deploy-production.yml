@@ -110,14 +110,9 @@ jobs:
                     --filters Name=vpc-id,Values="$VPC_ID" Name=default-for-az,Values=true \
                     --query "Subnets[].SubnetId" --output text | tr '\t' ',')
 
-                  AMI_ID=$(aws ec2 describe-images --owners amazon \
-                    --filters "Name=name,Values=al2023-ami-2023.*-x86_64" \
-                    --query "sort_by(Images, &CreationDate)[-1].ImageId" --output text)
-
                   echo "Using VPC $VPC_ID and subnets $SUBNET_IDS"
                   echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
                   echo "subnet_ids=$SUBNET_IDS" >> "$GITHUB_OUTPUT"
-                  echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
 
             # Creates the bucket on the first run. Later runs leave it alone, and the
             # bucket is kept even if this stack is deleted.
@@ -146,7 +141,6 @@ jobs:
                   JWT_SECRET: ${{ secrets.JWT_SECRET }}
                   VPC_ID: ${{ steps.network.outputs.vpc_id }}
                   SUBNET_IDS: ${{ steps.network.outputs.subnet_ids }}
-                  AMI_ID: ${{ steps.network.outputs.ami_id }}
                   IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
               run: |
                   aws cloudformation deploy \
@@ -158,7 +152,7 @@ jobs:
                       SubnetIds="$SUBNET_IDS" \
                       MinServers=1 \
                       MaxServers=2 \
-                      AmiId="$AMI_ID" \
+                      AmiId="ami-0da639e071ea706d8" \
                       ImageRepository="$IMAGE_REPOSITORY" \
                       ImageTag=production \
                       DbPassword="$DB_PASSWORD" \

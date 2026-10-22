@@ -7,6 +7,7 @@ const postSelect = (userId) => ({
     title: true,
     content: true,
     image: true,
+    createdAt: true,
     author: { select: { username: true } },
     _count: { select: { likes: true } },
     likes: userId ? { where: { userId }, select: { userId: true } } : false,
@@ -49,6 +50,34 @@ exports.createPost = async ({ authorId, title, content, image }) => {
         if (key) await storage.deleteImage(key).catch(() => {});
         throw err;
     }
+};
+
+// returns null if the post doesn't exist, false if it isn't the user's, otherwise the updated post
+exports.updatePost = async (id, userId, { title, content }) => {
+    const existing = await prisma.post.findUnique({ where: { id }, select: { authorId: true } });
+    if (!existing) return null;
+    if (existing.authorId !== userId) return false;
+    const post = await prisma.post.update({
+        where: { id },
+        data: { title, content },
+        select: postSelect(userId),
+    });
+    return toResponse(post);
+};
+
+// returns null if the post doesn't exist, false if it isn't the user's, otherwise true.
+// likes are removed by the cascade in the schema
+exports.deletePost = async (id, userId) => {
+    const existing = await prisma.post.findUnique({
+        where: { id },
+        select: { authorId: true, image: true },
+    });
+    if (!existing) return null;
+    if (existing.authorId !== userId) return false;
+    await prisma.post.delete({ where: { id } });
+    // the post is already gone, so a failed image delete only leaves an orphaned object
+    if (existing.image && storage.enabled) await storage.deleteImage(existing.image).catch(() => {});
+    return true;
 };
 
 const postExists = async (id) => {

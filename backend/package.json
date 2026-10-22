@@ -11,6 +11,11 @@
         "db:seed": "prisma db seed",
         "db:reset": "prisma migrate reset --force && prisma db seed"
     },
+    "jest": {
+        "setupFilesAfterEnv": [
+            "<rootDir>/tests/setup.js"
+        ]
+    },
     "keywords": [],
     "author": "",
     "license": "ISC",
