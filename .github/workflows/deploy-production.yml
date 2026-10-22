@@ -23,8 +23,10 @@ concurrency:
 env:
     AWS_REGION: ap-southeast-2
     STACK_NAME: social-lite-production
+    IMAGES_STACK_NAME: social-lite-production-images
     IMAGE_REPOSITORY: social-lite-app
     TEMPLATE: cloudformation/app-server.yaml
+    IMAGES_TEMPLATE: cloudformation/image-bucket.yaml
 
 jobs:
     deploy:
@@ -98,6 +100,23 @@ jobs:
                   echo "db_subnet_ids=$DB_SUBNET_IDS" >> "$GITHUB_OUTPUT"
                   echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
 
+            # Creates the bucket on the first run. Later runs leave it alone, and the
+            # bucket is kept even if this stack is deleted.
+            - name: Create or update the production image bucket
+              id: bucket
+              run: |
+                  set -euo pipefail
+                  aws cloudformation deploy \
+                    --stack-name "$IMAGES_STACK_NAME" \
+                    --template-file "$IMAGES_TEMPLATE" \
+                    --no-fail-on-empty-changeset \
+                    --parameter-overrides Environment=production
+
+                  BUCKET=$(aws cloudformation describe-stacks --stack-name "$IMAGES_STACK_NAME" \
+                    --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text)
+                  echo "Production images are stored in $BUCKET"
+                  echo "name=$BUCKET" >> "$GITHUB_OUTPUT"
+
             # Runs once. Creating the database takes about 10 minutes. The server starts
             # the app once the image is tagged as production, in step 3.
             - name: Create the production stack
@@ -109,24 +128,28 @@ jobs:
                   SUBNET_ID: ${{ steps.network.outputs.subnet_id }}
                   DB_SUBNET_IDS: ${{ steps.network.outputs.db_subnet_ids }}
                   AMI_ID: ${{ steps.network.outputs.ami_id }}
+                  IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
               run: |
-                  aws cloudformation deploy                     --stack-name "$STACK_NAME"                     --template-file "$TEMPLATE"                     --capabilities CAPABILITY_IAM                     --parameter-overrides                       VpcId="$VPC_ID"                       SubnetId="$SUBNET_ID"                       DbSubnetIds="$DB_SUBNET_IDS"                       AmiId="$AMI_ID"                       ImageRepository="$IMAGE_REPOSITORY"                       ImageTag=production                       DbPassword="$DB_PASSWORD"                       JwtSecret="$JWT_SECRET"                       SeedDatabase=false
+                  aws cloudformation deploy                     --stack-name "$STACK_NAME"                     --template-file "$TEMPLATE"                     --capabilities CAPABILITY_IAM                     --parameter-overrides                       VpcId="$VPC_ID"                       SubnetId="$SUBNET_ID"                       DbSubnetIds="$DB_SUBNET_IDS"                       AmiId="$AMI_ID"                       ImageRepository="$IMAGE_REPOSITORY"                       ImageTag=production                       DbPassword="$DB_PASSWORD"                       JwtSecret="$JWT_SECRET"                       SeedDatabase=false                       ImageBucket="$IMAGE_BUCKET"
 
-            # Only DbSubnetIds is passed, so CloudFormation keeps the other values the stack
-            # was created with, including the server's image. Only template changes are applied.
+            # Only DbSubnetIds and ImageBucket are passed, so CloudFormation keeps the other values
+            # the stack was created with, including the server's image. Only template changes are applied.
             - name: Apply template changes
               if: steps.network.outputs.exists == 'true'
               env:
                   DB_SUBNET_IDS: ${{ steps.network.outputs.db_subnet_ids }}
+                  IMAGE_BUCKET: ${{ steps.bucket.outputs.name }}
               run: |
-                  aws cloudformation deploy                     --stack-name "$STACK_NAME"                     --template-file "$TEMPLATE"                     --capabilities CAPABILITY_IAM                     --no-fail-on-empty-changeset                     --parameter-overrides DbSubnetIds="$DB_SUBNET_IDS"
+                  aws cloudformation deploy                     --stack-name "$STACK_NAME"                     --template-file "$TEMPLATE"                     --capabilities CAPABILITY_IAM                     --no-fail-on-empty-changeset                     --parameter-overrides DbSubnetIds="$DB_SUBNET_IDS" ImageBucket="$IMAGE_BUCKET"
 
             - name: Show why the stack failed
               if: failure()
               run: |
-                  aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
-                    --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
-                    --output table || true
+                  for STACK in "$IMAGES_STACK_NAME" "$STACK_NAME"; do
+                    aws cloudformation describe-stack-events --stack-name "$STACK" \
+                      --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
+                      --output table || true
+                  done
 
             # ---- 3. Release the image ----
             # Adds a tag to the tested image.
