@@ -1,5 +1,6 @@
 # Requires: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, JWT_SECRET, DB_PASSWORD in GitHub secrets
 # The first run creates the production stack. Later runs update it in place.
+# Once the release is live, staging is removed. The next staging deploy creates it again.
 name: Deploy production
 
 on:
@@ -24,6 +25,7 @@ env:
     AWS_REGION: ap-southeast-2
     STACK_NAME: social-lite-production
     IMAGES_STACK_NAME: social-lite-production-images
+    STAGING_STACK_NAME: social-lite-staging
     IMAGE_REPOSITORY: social-lite-app
     TEMPLATE: cloudformation/app-server.yaml
     IMAGES_TEMPLATE: cloudformation/image-bucket.yaml
@@ -241,3 +243,57 @@ jobs:
                   PAGE=$(curl --fail --silent --show-error "$APP_URL/")
                   echo "$PAGE" | grep -q '<title>SocialLite</title>'
                   echo "Home page check passed."
+
+    # Staging only needs to run while a release is being tested. Its tested image stays in ECR,
+    # and its image bucket is kept, so only the servers, load balancer and database are removed.
+    remove-staging:
+        name: Remove staging
+        needs: deploy
+        runs-on: ubuntu-latest
+        # Waits for a staging deploy that is already running, so one is never deleted halfway through
+        concurrency:
+            group: deploy-staging
+            cancel-in-progress: false
+        steps:
+            - name: Log in to AWS
+              uses: aws-actions/configure-aws-credentials@v5
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ env.AWS_REGION }}
+
+            # The template keeps a snapshot of a deleted database. Staging's data is test data
+            # that is reseeded on every deploy, so its snapshots are deleted too.
+            - name: Delete the staging stack and its database snapshots
+              run: |
+                  set -euo pipefail
+                  if ! aws cloudformation describe-stacks --stack-name "$STAGING_STACK_NAME" > /dev/null 2>&1; then
+                    echo "Staging has already been removed."
+                    exit 0
+                  fi
+
+                  DB_ID=$(aws cloudformation describe-stack-resource --stack-name "$STAGING_STACK_NAME" \
+                    --logical-resource-id Database \
+                    --query "StackResourceDetail.PhysicalResourceId" --output text 2> /dev/null || echo "")
+
+                  echo "Deleting $STAGING_STACK_NAME..."
+                  aws cloudformation delete-stack --stack-name "$STAGING_STACK_NAME"
+                  aws cloudformation wait stack-delete-complete --stack-name "$STAGING_STACK_NAME"
+                  echo "Deleted $STAGING_STACK_NAME."
+
+                  if [ -n "$DB_ID" ] && [ "$DB_ID" != "None" ]; then
+                    SNAPSHOTS=$(aws rds describe-db-snapshots --db-instance-identifier "$DB_ID" \
+                      --snapshot-type manual --query "DBSnapshots[].DBSnapshotIdentifier" --output text)
+                    for SNAPSHOT in $SNAPSHOTS; do
+                      aws rds wait db-snapshot-available --db-snapshot-identifier "$SNAPSHOT"
+                      aws rds delete-db-snapshot --db-snapshot-identifier "$SNAPSHOT" > /dev/null
+                      echo "Deleted database snapshot $SNAPSHOT."
+                    done
+                  fi
+
+            - name: Show why staging couldn't be deleted
+              if: failure()
+              run: |
+                  aws cloudformation describe-stack-events --stack-name "$STAGING_STACK_NAME" \
+                    --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId, ResourceStatus, ResourceStatusReason]" \
+                    --output table || true
