@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECR repository that stores the Social Lite Docker image
+
+# Create this once by hand, from the repository root:
+#   aws cloudformation deploy --stack-name social-lite-ecr --template-file cloudformation/ecr-repository.yaml --region ap-southeast-2
+
+Parameters:
+    RepositoryName:
+        Type: String
+        Default: social-lite-app
+        Description: Name of the ECR repository
+
+Resources:
+    ImageRepository:
+        Type: AWS::ECR::Repository
+        Properties:
+            RepositoryName: !Ref RepositoryName
+            # Each deploy pushes a new image, so only keep the latest 10.
+            # Rule 1 keeps the image tagged "production", however old it is.
+            LifecyclePolicy:
+                LifecyclePolicyText: |
+                    {
+                      "rules": [
+                        {
+                          "rulePriority": 1,
+                          "description": "Never expire the production image",
+                          "selection": {
+                            "tagStatus": "tagged",
+                            "tagPrefixList": ["production"],
+                            "countType": "imageCountMoreThan",
+                            "countNumber": 1
+                          },
+                          "action": { "type": "expire" }
+                        },
+                        {
+                          "rulePriority": 2,
+                          "description": "Keep the 10 most recent images",
+                          "selection": {
+                            "tagStatus": "any",
+                            "countType": "imageCountMoreThan",
+                            "countNumber": 10
+                          },
+                          "action": { "type": "expire" }
+                        }
+                      ]
+                    }
+
+Outputs:
+    RepositoryUri:
+        Description: Address used to push and pull the image
+        Value: !GetAtt ImageRepository.RepositoryUri

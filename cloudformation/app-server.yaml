@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EC2 server that runs Social Lite and MySQL in Docker
+
+# Used by staging and production, with different parameters:
+#   staging     ImageTag=<code hash>   SeedDatabase=true   recreated every deploy
+#   production  ImageTag=production    SeedDatabase=false  created once and kept
+#
+# The server runs whatever image its ImageTag points to in ECR, and checks every
+# minute for a new one. Production is updated by moving the "production" tag.
+#
+# The ECR repository from ecr-repository.yaml must exist first.
+
+Parameters:
+    # ---- Network and server ----
+
+    VpcId:
+        Type: AWS::EC2::VPC::Id
+        Description: VPC to run the server in
+
+    # Must be a public subnet inside the VPC above
+    SubnetId:
+        Type: AWS::EC2::Subnet::Id
+        Description: Public subnet for the server
+
+    # Looked up by the workflow when the stack is created. Kept as a fixed value so a
+    # new Amazon Linux release never makes CloudFormation replace the production server.
+    AmiId:
+        Type: AWS::EC2::Image::Id
+        Description: Amazon Linux 2023 image for the server
+
+    # ---- App image ----
+
+    ImageRepository:
+        Type: String
+        Default: social-lite-app
+        Description: ECR repository name
+
+    ImageTag:
+        Type: String
+        Description: Image tag the server runs
+
+    # ---- Secrets and data ----
+
+    # Letters and numbers only, as symbols break the database URL
+    DbPassword:
+        Type: String
+        NoEcho: true
+        MinLength: 8
+        AllowedPattern: "[A-Za-z0-9]+"
+        ConstraintDescription: Must be at least 8 letters or numbers
+        Description: MySQL root password
+
+    JwtSecret:
+        Type: String
+        NoEcho: true
+        MinLength: 16
+        Description: Secret used to sign login tokens
+
+    # Seeding replaces all users and posts with test data, so only staging uses it
+    SeedDatabase:
+        Type: String
+        Default: "false"
+        AllowedValues: ["true", "false"]
+        Description: Fill the database with test data on first start
+
+Resources:
+    # ---- Access ----
+
+    # Firewall: only allow web traffic in
+    SecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allow HTTP traffic to Social Lite
+            VpcId: !Ref VpcId
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 80
+                  ToPort: 80
+                  CidrIp: 0.0.0.0/0
+
+    # Lets the server pull images from ECR, and nothing else
+    InstanceRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service: ec2.amazonaws.com
+                      Action: sts:AssumeRole
+            ManagedPolicyArns:
+                - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+    InstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Roles:
+                - !Ref InstanceRole
+
+    # ---- Server ----
+
+    Server:
+        Type: AWS::EC2::Instance
+        Properties:
+            ImageId: !Ref AmiId
+            # Small rather than micro, so there is enough memory for the app and MySQL
+            InstanceType: t3.small
+            IamInstanceProfile: !Ref InstanceProfile
+            NetworkInterfaces:
+                - AssociatePublicIpAddress: true
+                  DeviceIndex: "0"
+                  GroupSet:
+                      - !Ref SecurityGroup
+                  SubnetId: !Ref SubnetId
+
+            # Runs once, when the server first boots
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    # Stop on any error. No -x, so passwords aren't printed to the logs.
+                    set -eu
+
+                    # 1. Install Docker and the AWS CLI
+                    dnf install -y docker awscli-2
+                    systemctl enable --now docker
+
+                    # 2. Save the app's settings, used every time the app container starts
+                    #    (allowPublicKeyRetrieval lets the app log in to MySQL 8 without TLS)
+                    cat > /etc/sociallite.env <<EOF
+                    DATABASE_URL=mysql://root:${DbPassword}@mysql:3306/sociallite?allowPublicKeyRetrieval=true
+                    JWT_SECRET=${JwtSecret}
+                    EOF
+                    chmod 600 /etc/sociallite.env
+
+                    # 3. Start MySQL on a private network that only the app can reach.
+                    #    Its data is kept in the mysql-data volume on the server's disk.
+                    docker network create sociallite
+                    docker run -d --restart unless-stopped --name mysql --network sociallite \
+                      -e MYSQL_ROOT_PASSWORD='${DbPassword}' -e MYSQL_DATABASE=sociallite \
+                      -v mysql-data:/var/lib/mysql mysql:8.4
+
+                    until docker exec mysql mysqladmin ping -h 127.0.0.1 -uroot -p'${DbPassword}' --silent; do
+                      sleep 5
+                    done
+
+                    # 4. Write the update script. It downloads the image tagged ${ImageTag}
+                    #    and, if it is new, backs up the database, migrates, and swaps the app.
+                    cat > /usr/local/bin/update-app <<'EOF'
+                    #!/bin/bash
+                    set -euo pipefail
+                    REGISTRY=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+                    IMAGE=$REGISTRY/${ImageRepository}:${ImageTag}
+
+                    aws ecr get-login-password --region ${AWS::Region} |
+                      docker login --username AWS --password-stdin $REGISTRY > /dev/null
+                    docker pull -q $IMAGE > /dev/null
+
+                    # Stop here if the app is already running this image
+                    NEW=$(docker image inspect --format '{{.Id}}' $IMAGE)
+                    CURRENT=$(docker inspect --format '{{.Image}}' app 2> /dev/null || echo none)
+                    if [ "$NEW" = "$CURRENT" ]; then exit 0; fi
+                    echo "Updating the app to $NEW"
+
+                    # Back up the database, keeping the latest 5 backups
+                    mkdir -p /var/backups/sociallite
+                    docker exec mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction sociallite' \
+                      > /var/backups/sociallite/$(date -u +%Y%m%dT%H%M%SZ).sql
+                    ls -1t /var/backups/sociallite/*.sql | tail -n +6 | xargs -r rm --
+
+                    # Apply new migrations. This never seeds. If it fails, the old app keeps running.
+                    docker run --rm --network sociallite --env-file /etc/sociallite.env $IMAGE \
+                      npx prisma migrate deploy
+
+                    # Replace the app, with port 80 on the server going to port 3000 in the container
+                    docker rm -f app 2> /dev/null || true
+                    docker run -d --restart unless-stopped --name app --network sociallite -p 80:3000 \
+                      --env-file /etc/sociallite.env $IMAGE
+
+                    # Remove old images so the disk doesn't fill up
+                    docker image prune -af > /dev/null
+                    EOF
+                    chmod +x /usr/local/bin/update-app
+
+                    # 5. Start the app, then add test data if asked to
+                    /usr/local/bin/update-app
+                    if [ "${SeedDatabase}" = "true" ]; then
+                      docker exec app npx prisma db seed
+                    fi
+
+                    # 6. Run the update script every minute, so the server follows its image tag
+                    cat > /etc/systemd/system/update-app.service <<'EOF'
+                    [Unit]
+                    Description=Keep Social Lite on the latest image
+                    After=docker.service
+
+                    [Service]
+                    ExecStart=/bin/bash -c 'while true; do sleep 60; /usr/local/bin/update-app; done'
+                    Restart=always
+
+                    [Install]
+                    WantedBy=multi-user.target
+                    EOF
+                    systemctl enable --now update-app
+
+    # ---- Monitoring ----
+
+    # Alarm when average CPU stays above 80% for 10 minutes (two 5 minute checks)
+    CPUAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmDescription: Social Lite server CPU is high
+            Namespace: AWS/EC2
+            MetricName: CPUUtilization
+            Dimensions:
+                - Name: InstanceId
+                  Value: !Ref Server
+            Statistic: Average
+            Period: 300
+            EvaluationPeriods: 2
+            Threshold: 80
+            ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+    AppURL:
+        Description: Social Lite web address
+        Value: !Sub "http://${Server.PublicIp}"
