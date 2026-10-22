@@ -1,5 +1,6 @@
 import { useState } from "react";
 import Avatar from "./Avatar.jsx";
+import PostMenu from "./PostMenu.jsx";
 import { excerptOf, timeAgo } from "../format.js";
 import "./Post.css";
 
@@ -23,8 +24,8 @@ export function PostAuthor({ username, createdAt, size }) {
     );
 }
 
-// a post in the feed, clicking it opens the full post
-function Post({ post, user, onOpen, onToggleLike }) {
+// a post in the feed, clicking it opens the full post.
+function Post({ post, user, onOpen, onToggleLike, onEdit }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
 
@@ -44,7 +45,7 @@ function Post({ post, user, onOpen, onToggleLike }) {
         }
     }
 
-    // the like button sits beside the open button rather than inside it, since buttons can't nest
+    // the menu and like button sit beside the open button rather than inside it, since buttons can't nest
     return (
         <div className="card card-interactive post-card">
             <button
@@ -55,9 +56,7 @@ function Post({ post, user, onOpen, onToggleLike }) {
             >
                 <PostAuthor username={post.username} createdAt={post.createdAt} />
                 {post.title && <span className="post-title">{post.title}</span>}
-                {post.image && (
-                    <img className="post-image" src={post.image} alt="" />
-                )}
+                {post.image && <img className="post-image" src={post.image} alt="" />}
                 {excerpt && <span className="post-excerpt">{excerpt}</span>}
                 {isLong && (
                     <span className="post-more">
@@ -108,6 +107,7 @@ function Post({ post, user, onOpen, onToggleLike }) {
                     </p>
                 )}
             </div>
+            {onEdit && <PostMenu onEdit={onEdit} />}
         </div>
     );
 }

@@ -52,6 +52,18 @@ exports.createPost = async ({ authorId, title, content, image }) => {
     }
 };
 
+// returns null if the post doesn't exist, false if it isn't the user's, otherwise the updated post
+exports.updatePost = async (id, userId, { title, content }) => {
+    const existing = await prisma.post.findUnique({ where: { id }, select: { authorId: true } });
+    if (!existing) return null;
+    const post = await prisma.post.update({
+        where: { id },
+        data: { title, content },
+        select: postSelect(userId),
+    });
+    return toResponse(post);
+};
+
 const postExists = async (id) => {
     return (await prisma.post.count({ where: { id } })) > 0;
 };

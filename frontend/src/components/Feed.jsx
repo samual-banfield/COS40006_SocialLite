@@ -1,7 +1,7 @@
 import Post from "./Post.jsx";
 import "./Feed.css";
 
-function Feed({ posts, user, loading, error, onOpenPost, onToggleLike }) {
+function Feed({ posts, user, loading, error, onOpenPost, onToggleLike, onEditPost }) {
     return (
         <section className="feed">
             <h1 className="feed-heading">Feed</h1>
@@ -19,6 +19,7 @@ function Feed({ posts, user, loading, error, onOpenPost, onToggleLike }) {
                     user={user}
                     onOpen={() => onOpenPost(post.id)}
                     onToggleLike={onToggleLike}
+                    onEdit={user ? () => onEditPost(post.id) : undefined}
                 />
             ))}
         </section>
